@@ -4,7 +4,7 @@
 monitoring widgets in [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) without importing a CLI,
 TUI, HTTP server, or unrelated application framework.
 
-The repository is in the design stage. It contains no production Go package yet.
+M0 contract work is in progress. Collectors are not available yet.
 
 ## Scope
 
