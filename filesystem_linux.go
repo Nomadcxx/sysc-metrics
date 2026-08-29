@@ -38,7 +38,7 @@ func parseMountinfo(r io.Reader) ([]mountInfo, error) {
 		}
 		before := strings.Fields(line[:separator])
 		after := strings.Fields(line[separator+3:])
-		if len(before) < 6 || len(after) < 2 {
+		if len(before) < 6 || len(after) < 3 {
 			return nil, fmt.Errorf("mountinfo: short row")
 		}
 		mountID, err := strconv.ParseUint(before[0], 10, 64)

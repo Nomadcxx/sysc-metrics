@@ -170,3 +170,24 @@ func TestCPUSamplerResetInvalidatesOneObservation(t *testing.T) {
 		t.Fatalf("post-reset snapshot = %#v", got)
 	}
 }
+
+func TestCPUSamplerNonPositiveElapsedKeepsBaseline(t *testing.T) {
+	for _, offset := range []time.Duration{0, -time.Second} {
+		t.Run(offset.String(), func(t *testing.T) {
+			sampler := NewCPUSampler()
+			at := time.Unix(10, 0)
+			base := parsedCPU{aggregate: cpuTimes{user: 10, idle: 10}, cores: map[int]cpuTimes{0: {user: 10, idle: 10}}}
+			sampler.sampleCPU(base, cpuLoad{}, nil, nil, at)
+
+			invalid := parsedCPU{aggregate: cpuTimes{user: 100, idle: 10}, cores: map[int]cpuTimes{0: {user: 100, idle: 10}}}
+			sampler.sampleCPU(invalid, cpuLoad{}, nil, nil, at.Add(offset))
+
+			next := parsedCPU{aggregate: cpuTimes{user: 101, idle: 20}, cores: map[int]cpuTimes{0: {user: 101, idle: 20}}}
+			got := sampler.sampleCPU(next, cpuLoad{}, nil, nil, at.Add(time.Second))
+			want := float64(91) / 101
+			if !got.Usage.Valid || got.Usage.Fraction != want || !got.Cores[0].Usage.Valid || got.Cores[0].Usage.Fraction != want {
+				t.Fatalf("post-invalid usage = %#v, want fraction %v", got, want)
+			}
+		})
+	}
+}

@@ -2,7 +2,7 @@
 
 Date: 2026-08-27
 
-## M0: Foundation — complete on `milestone/core-counters`
+## M0: Foundation (complete)
 
 - approve units, timestamps, partial-error behavior, and rate semantics;
 - record dgop provenance used as behavioral reference;
@@ -10,7 +10,7 @@ Date: 2026-08-27
 
 Gate: public types do not contain shell presentation or cross-platform abstractions.
 
-## M1: Core counters — complete on `milestone/core-counters`
+## M1: Core counters (complete)
 
 - CPU, memory, swap, uptime, filesystem capacity, block-device counters, and network counters;
 - fixture parsers and stateful rate tests;

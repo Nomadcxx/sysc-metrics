@@ -71,6 +71,9 @@ func TestReadNetworkPreservesCountersWhenIfindexFails(t *testing.T) {
 	if err != nil || len(interfaces) != 1 || interfaces[0].ReceiveBytes != 10 || interfaces[0].Index != 0 || len(issues) != 1 {
 		t.Fatalf("readNetwork() = %#v, %#v, %v", interfaces, issues, err)
 	}
+	if !networkIdentityValid(interfaces[0], issues) {
+		t.Fatal("recoverable ifindex issue failed the live identity invariant")
+	}
 }
 
 func TestNetworkSamplerRatesAndIdentity(t *testing.T) {

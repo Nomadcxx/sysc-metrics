@@ -204,7 +204,8 @@ func parseFrequency(r io.Reader) (uint64, error) {
 
 func (s *CPUSampler) sampleCPU(parsed parsedCPU, load cpuLoad, frequencies map[int]uint64, issues []Issue, at time.Time) CPUSnapshot {
 	snapshot := CPUSnapshot{CollectedAt: at, Load1: load.Load1, Load5: load.Load5, Load15: load.Load15, LoadValid: load.Valid, Issues: append([]Issue(nil), issues...)}
-	if s.previous != nil && at.Sub(s.previous.at) > 0 {
+	positiveElapsed := s.previous != nil && at.Sub(s.previous.at) > 0
+	if positiveElapsed {
 		snapshot.Usage = cpuUsage(s.previous.aggregate, parsed.aggregate)
 	}
 	ids := make([]int, 0, len(parsed.cores))
@@ -215,7 +216,7 @@ func (s *CPUSampler) sampleCPU(parsed parsedCPU, load cpuLoad, frequencies map[i
 	snapshot.Cores = make([]CPUCore, 0, len(ids))
 	for _, id := range ids {
 		core := CPUCore{ID: id}
-		if previous, ok := s.previousCore(id); ok && s.previous != nil && at.Sub(s.previous.at) > 0 {
+		if previous, ok := s.previousCore(id); ok && positiveElapsed {
 			core.Usage = cpuUsage(previous, parsed.cores[id])
 		}
 		if frequency, ok := frequencies[id]; ok {
@@ -224,11 +225,21 @@ func (s *CPUSampler) sampleCPU(parsed parsedCPU, load cpuLoad, frequencies map[i
 		}
 		snapshot.Cores = append(snapshot.Cores, core)
 	}
-	cores := make(map[int]cpuTimes, len(parsed.cores))
-	for id, times := range parsed.cores {
-		cores[id] = times
+	if s.previous == nil || positiveElapsed {
+		cores := make(map[int]cpuTimes, len(parsed.cores))
+		for id, times := range parsed.cores {
+			cores[id] = times
+		}
+		s.previous = &cpuState{at: at, aggregate: parsed.aggregate, cores: cores}
+	} else {
+		cores := make(map[int]cpuTimes, len(parsed.cores))
+		for id := range parsed.cores {
+			if previous, ok := s.previous.cores[id]; ok {
+				cores[id] = previous
+			}
+		}
+		s.previous.cores = cores
 	}
-	s.previous = &cpuState{at: at, aggregate: parsed.aggregate, cores: cores}
 	return snapshot
 }
 

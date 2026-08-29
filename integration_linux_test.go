@@ -70,7 +70,7 @@ func TestLinuxIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, iface := range firstNetwork.Interfaces {
-		if iface.Name == "" || iface.Index == 0 {
+		if !networkIdentityValid(iface, firstNetwork.Issues) {
 			t.Fatalf("network interface has invalid identity: %#v", iface)
 		}
 		if iface.Rates.Valid {
@@ -106,6 +106,22 @@ func TestLinuxIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkNetworkContinuity(t, firstNetwork, secondNetwork)
+}
+
+func networkIdentityValid(iface NetworkInterface, issues []Issue) bool {
+	if iface.Name == "" {
+		return false
+	}
+	if iface.Index != 0 {
+		return true
+	}
+	source := "/sys/class/net/" + iface.Name + "/ifindex"
+	for _, issue := range issues {
+		if issue.Source == source && issue.Err != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func assertFraction(t *testing.T, name string, value float64) {

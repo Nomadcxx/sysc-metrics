@@ -33,6 +33,7 @@ func TestParseMountinfoRejectsMalformedRows(t *testing.T) {
 	inputs := []string{
 		"1 1 0:1 / / rw ext4 /dev/a rw\n",
 		"1 1 0:1 / / rw - ext4\n",
+		"1 1 0:1 / / rw - ext4 /dev/a\n",
 		"nope 1 0:1 / / rw - ext4 /dev/a rw\n",
 		"1 1 0:1 / /bad\\999 rw - ext4 /dev/a rw\n",
 		"",

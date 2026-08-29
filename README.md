@@ -4,7 +4,7 @@
 monitoring widgets in [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) without importing a CLI,
 TUI, HTTP server, or unrelated application framework.
 
-The M0 contract and M1 core collectors are implemented on the `milestone/core-counters` branch.
+The M0 contract and M1 core collectors are implemented.
 
 ## Usage
 
