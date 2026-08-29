@@ -4,7 +4,36 @@
 monitoring widgets in [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) without importing a CLI,
 TUI, HTTP server, or unrelated application framework.
 
-The repository is in the design stage. It contains no production Go package yet.
+The M0 contract and M1 core collectors are implemented on the `milestone/core-counters` branch.
+
+## Usage
+
+```go
+package main
+
+import (
+	"fmt"
+	"github.com/Nomadcxx/sysc-metrics"
+)
+
+func main() {
+	snapshot, err := metrics.NewCPUSampler().Sample()
+	if err != nil {
+		panic(err)
+	}
+	if snapshot.Usage.Valid {
+		fmt.Println(snapshot.Usage.Fraction)
+	}
+}
+```
+
+M1 is Linux-only and uses only the Go standard library. Samplers belong to one sequential polling
+owner; they do not start goroutines. First and discontinuous rate samples have `Valid == false`, while
+valid zero values remain valid. A snapshot may contain partial data and `Issue` values for failed
+individual sources or entities.
+
+Polling cadence, caching, presentation, units shown to users, alerts, and filtering remain consumer
+responsibilities.
 
 ## Scope
 
