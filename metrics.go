@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package metrics provides read-only Linux system telemetry snapshots.
 package metrics
 
@@ -158,15 +160,12 @@ type NetworkSnapshot struct {
 }
 
 // CPUSampler retains the previous CPU counters for sequential rate sampling.
-type CPUSampler struct{}
+type CPUSampler struct {
+	previous *cpuState
+}
 
 // NewCPUSampler returns a CPU sampler owned by one sequential polling caller.
 func NewCPUSampler() *CPUSampler { return &CPUSampler{} }
-
-// Sample returns one CPU snapshot. The sampler is not safe for concurrent use.
-func (s *CPUSampler) Sample() (CPUSnapshot, error) {
-	return CPUSnapshot{}, errors.New("not implemented")
-}
 
 // NewBlockSampler returns a block sampler owned by one sequential polling caller.
 func NewBlockSampler() *BlockSampler { return &BlockSampler{} }
