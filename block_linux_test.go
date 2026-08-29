@@ -109,3 +109,26 @@ func TestBlockSamplerResetAndElapsedRules(t *testing.T) {
 		t.Fatalf("non-positive elapsed replaced baseline: %#v", got.Devices[0].Rates)
 	}
 }
+
+func TestBlockRatesRejectEveryCounterRegression(t *testing.T) {
+	previous := blockState{readBytes: 10, writeBytes: 10, readOperations: 10, writeOperations: 10, busy: 10 * time.Millisecond}
+	mutations := []struct {
+		name   string
+		change func(*BlockDevice)
+	}{
+		{"read bytes", func(value *BlockDevice) { value.ReadBytes = 9 }},
+		{"write bytes", func(value *BlockDevice) { value.WriteBytes = 9 }},
+		{"read operations", func(value *BlockDevice) { value.ReadOperations = 9 }},
+		{"write operations", func(value *BlockDevice) { value.WriteOperations = 9 }},
+		{"busy", func(value *BlockDevice) { value.Busy = 9 * time.Millisecond }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			current := BlockDevice{ReadBytes: 20, WriteBytes: 20, ReadOperations: 20, WriteOperations: 20, Busy: 20 * time.Millisecond}
+			mutation.change(&current)
+			if got := blockRates(previous, current, time.Second); got.Valid {
+				t.Fatalf("blockRates() = %#v after %s regression", got, mutation.name)
+			}
+		})
+	}
+}

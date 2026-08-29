@@ -20,8 +20,8 @@ type blockIdentity struct {
 }
 
 type blockState struct {
-	at     time.Time
-	device BlockDevice
+	readBytes, writeBytes, readOperations, writeOperations uint64
+	busy                                                   time.Duration
 }
 
 func parseDiskstats(r io.Reader) ([]BlockDevice, []Issue, error) {
@@ -113,17 +113,17 @@ func millisDuration(milliseconds uint64) (time.Duration, error) {
 	return time.Duration(milliseconds) * time.Millisecond, nil
 }
 
-func blockRates(previous, current BlockDevice, elapsed time.Duration) BlockRates {
-	if elapsed <= 0 || current.ReadBytes < previous.ReadBytes || current.WriteBytes < previous.WriteBytes || current.ReadOperations < previous.ReadOperations || current.WriteOperations < previous.WriteOperations || current.Busy < previous.Busy {
+func blockRates(previous blockState, current BlockDevice, elapsed time.Duration) BlockRates {
+	if elapsed <= 0 || current.ReadBytes < previous.readBytes || current.WriteBytes < previous.writeBytes || current.ReadOperations < previous.readOperations || current.WriteOperations < previous.writeOperations || current.Busy < previous.busy {
 		return BlockRates{}
 	}
 	seconds := elapsed.Seconds()
 	rates := BlockRates{
-		ReadBytesPerSecond:       float64(current.ReadBytes-previous.ReadBytes) / seconds,
-		WriteBytesPerSecond:      float64(current.WriteBytes-previous.WriteBytes) / seconds,
-		ReadOperationsPerSecond:  float64(current.ReadOperations-previous.ReadOperations) / seconds,
-		WriteOperationsPerSecond: float64(current.WriteOperations-previous.WriteOperations) / seconds,
-		BusyFraction:             float64(current.Busy-previous.Busy) / float64(elapsed),
+		ReadBytesPerSecond:       float64(current.ReadBytes-previous.readBytes) / seconds,
+		WriteBytesPerSecond:      float64(current.WriteBytes-previous.writeBytes) / seconds,
+		ReadOperationsPerSecond:  float64(current.ReadOperations-previous.readOperations) / seconds,
+		WriteOperationsPerSecond: float64(current.WriteOperations-previous.writeOperations) / seconds,
+		BusyFraction:             float64(current.Busy-previous.busy) / float64(elapsed),
 		Valid:                    true,
 	}
 	if math.IsNaN(rates.ReadBytesPerSecond) || math.IsInf(rates.ReadBytesPerSecond, 0) || math.IsNaN(rates.WriteBytesPerSecond) || math.IsInf(rates.WriteBytesPerSecond, 0) || math.IsNaN(rates.ReadOperationsPerSecond) || math.IsInf(rates.ReadOperationsPerSecond, 0) || math.IsNaN(rates.WriteOperationsPerSecond) || math.IsInf(rates.WriteOperationsPerSecond, 0) || math.IsNaN(rates.BusyFraction) || math.IsInf(rates.BusyFraction, 0) {
@@ -142,10 +142,10 @@ func (s *BlockSampler) sampleBlock(devices []BlockDevice, issues []Issue, at tim
 	for _, device := range devices {
 		identity := blockIdentity{major: device.Major, minor: device.Minor}
 		if previous, ok := s.previous[identity]; ok && elapsed > 0 {
-			device.Rates = blockRates(previous.device, device, elapsed)
+			device.Rates = blockRates(previous, device, elapsed)
 		}
 		if s.previousAt.IsZero() || elapsed > 0 {
-			next[identity] = blockState{at: at, device: device}
+			next[identity] = blockState{readBytes: device.ReadBytes, writeBytes: device.WriteBytes, readOperations: device.ReadOperations, writeOperations: device.WriteOperations, busy: device.Busy}
 		} else {
 			if previous, ok := s.previous[identity]; ok {
 				next[identity] = previous

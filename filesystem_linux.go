@@ -171,7 +171,11 @@ func ReadFilesystems() (FilesystemSnapshot, error) {
 		return FilesystemSnapshot{}, fmt.Errorf("/proc/self/mountinfo: %w", err)
 	}
 	defer file.Close()
-	return readFilesystems(file, func(path string, stat *syscall.Statfs_t) error {
+	snapshot, err := readFilesystems(file, func(path string, stat *syscall.Statfs_t) error {
 		return syscall.Statfs(path, stat)
 	}, at)
+	if err != nil {
+		return FilesystemSnapshot{}, fmt.Errorf("/proc/self/mountinfo: %w", err)
+	}
+	return snapshot, nil
 }

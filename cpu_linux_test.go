@@ -79,6 +79,32 @@ func TestCPUUsage(t *testing.T) {
 	}
 }
 
+func TestCPUUsageRejectsEveryCounterRegression(t *testing.T) {
+	mutations := []struct {
+		name   string
+		change func(*cpuTimes)
+	}{
+		{"user", func(value *cpuTimes) { value.user = 9 }},
+		{"nice", func(value *cpuTimes) { value.nice = 9 }},
+		{"system", func(value *cpuTimes) { value.system = 9 }},
+		{"idle", func(value *cpuTimes) { value.idle = 9 }},
+		{"iowait", func(value *cpuTimes) { value.iowait = 9 }},
+		{"irq", func(value *cpuTimes) { value.irq = 9 }},
+		{"softirq", func(value *cpuTimes) { value.softirq = 9 }},
+		{"steal", func(value *cpuTimes) { value.steal = 9 }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			previous := cpuTimes{user: 10, nice: 10, system: 10, idle: 10, iowait: 10, irq: 10, softirq: 10, steal: 10}
+			current := previous
+			mutation.change(&current)
+			if got := cpuUsage(previous, current); got.Valid {
+				t.Fatalf("cpuUsage() = %#v after %s regression", got, mutation.name)
+			}
+		})
+	}
+}
+
 func TestParseLoadavg(t *testing.T) {
 	load, err := parseLoadavg(strings.NewReader("1.25 2 3.5 1/100 123\n"))
 	if err != nil || load != (cpuLoad{Load1: 1.25, Load5: 2, Load15: 3.5, Valid: true}) {

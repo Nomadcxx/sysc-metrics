@@ -130,20 +130,19 @@ func readNetwork(r io.Reader, indexFunc func(string) (uint32, error), at time.Ti
 }
 
 type networkState struct {
-	at    time.Time
-	iface NetworkInterface
+	receiveBytes, receivePackets, transmitBytes, transmitPackets uint64
 }
 
-func networkRates(previous, current NetworkInterface, elapsed time.Duration) NetworkRates {
-	if elapsed <= 0 || current.ReceiveBytes < previous.ReceiveBytes || current.ReceivePackets < previous.ReceivePackets || current.TransmitBytes < previous.TransmitBytes || current.TransmitPackets < previous.TransmitPackets {
+func networkRates(previous networkState, current NetworkInterface, elapsed time.Duration) NetworkRates {
+	if elapsed <= 0 || current.ReceiveBytes < previous.receiveBytes || current.ReceivePackets < previous.receivePackets || current.TransmitBytes < previous.transmitBytes || current.TransmitPackets < previous.transmitPackets {
 		return NetworkRates{}
 	}
 	seconds := elapsed.Seconds()
 	rates := NetworkRates{
-		ReceiveBytesPerSecond:    float64(current.ReceiveBytes-previous.ReceiveBytes) / seconds,
-		TransmitBytesPerSecond:   float64(current.TransmitBytes-previous.TransmitBytes) / seconds,
-		ReceivePacketsPerSecond:  float64(current.ReceivePackets-previous.ReceivePackets) / seconds,
-		TransmitPacketsPerSecond: float64(current.TransmitPackets-previous.TransmitPackets) / seconds,
+		ReceiveBytesPerSecond:    float64(current.ReceiveBytes-previous.receiveBytes) / seconds,
+		TransmitBytesPerSecond:   float64(current.TransmitBytes-previous.transmitBytes) / seconds,
+		ReceivePacketsPerSecond:  float64(current.ReceivePackets-previous.receivePackets) / seconds,
+		TransmitPacketsPerSecond: float64(current.TransmitPackets-previous.transmitPackets) / seconds,
 		Valid:                    true,
 	}
 	if math.IsNaN(rates.ReceiveBytesPerSecond) || math.IsInf(rates.ReceiveBytesPerSecond, 0) || math.IsNaN(rates.TransmitBytesPerSecond) || math.IsInf(rates.TransmitBytesPerSecond, 0) || math.IsNaN(rates.ReceivePacketsPerSecond) || math.IsInf(rates.ReceivePacketsPerSecond, 0) || math.IsNaN(rates.TransmitPacketsPerSecond) || math.IsInf(rates.TransmitPacketsPerSecond, 0) {
@@ -162,10 +161,10 @@ func (s *NetworkSampler) sampleNetwork(interfaces []NetworkInterface, issues []I
 	for _, iface := range interfaces {
 		if iface.Index != 0 {
 			if previous, ok := s.previous[iface.Index]; ok && elapsed > 0 {
-				iface.Rates = networkRates(previous.iface, iface, elapsed)
+				iface.Rates = networkRates(previous, iface, elapsed)
 			}
 			if s.previousAt.IsZero() || elapsed > 0 {
-				next[iface.Index] = networkState{at: at, iface: iface}
+				next[iface.Index] = networkState{receiveBytes: iface.ReceiveBytes, receivePackets: iface.ReceivePackets, transmitBytes: iface.TransmitBytes, transmitPackets: iface.TransmitPackets}
 			} else if previous, ok := s.previous[iface.Index]; ok {
 				next[iface.Index] = previous
 			}

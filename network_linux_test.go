@@ -102,3 +102,25 @@ func TestNetworkSamplerRatesAndIdentity(t *testing.T) {
 		t.Fatalf("missing ifindex = %#v", got.Interfaces[0])
 	}
 }
+
+func TestNetworkRatesRejectEveryCounterRegression(t *testing.T) {
+	previous := networkState{receiveBytes: 10, receivePackets: 10, transmitBytes: 10, transmitPackets: 10}
+	mutations := []struct {
+		name   string
+		change func(*NetworkInterface)
+	}{
+		{"receive bytes", func(value *NetworkInterface) { value.ReceiveBytes = 9 }},
+		{"receive packets", func(value *NetworkInterface) { value.ReceivePackets = 9 }},
+		{"transmit bytes", func(value *NetworkInterface) { value.TransmitBytes = 9 }},
+		{"transmit packets", func(value *NetworkInterface) { value.TransmitPackets = 9 }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			current := NetworkInterface{ReceiveBytes: 20, ReceivePackets: 20, TransmitBytes: 20, TransmitPackets: 20}
+			mutation.change(&current)
+			if got := networkRates(previous, current, time.Second); got.Valid {
+				t.Fatalf("networkRates() = %#v after %s regression", got, mutation.name)
+			}
+		})
+	}
+}
