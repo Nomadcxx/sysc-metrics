@@ -4,7 +4,6 @@
 package metrics
 
 import (
-	"errors"
 	"fmt"
 	"time"
 )
@@ -171,25 +170,16 @@ func NewCPUSampler() *CPUSampler { return &CPUSampler{} }
 func NewBlockSampler() *BlockSampler { return &BlockSampler{} }
 
 // BlockSampler retains previous block counters for sequential rate sampling.
-type BlockSampler struct{}
-
-// Sample returns one block-device snapshot. The sampler is not safe for concurrent use.
-func (s *BlockSampler) Sample() (BlockSnapshot, error) {
-	return BlockSnapshot{}, errors.New("not implemented")
+type BlockSampler struct {
+	previous   map[blockIdentity]blockState
+	previousAt time.Time
 }
 
 // NewNetworkSampler returns a network sampler owned by one sequential polling caller.
 func NewNetworkSampler() *NetworkSampler { return &NetworkSampler{} }
 
 // NetworkSampler retains previous interface counters for sequential rate sampling.
-type NetworkSampler struct{}
-
-// Sample returns one network snapshot. The sampler is not safe for concurrent use.
-func (s *NetworkSampler) Sample() (NetworkSnapshot, error) {
-	return NetworkSnapshot{}, errors.New("not implemented")
-}
-
-// ReadFilesystems returns one mounted-filesystem snapshot from Linux.
-func ReadFilesystems() (FilesystemSnapshot, error) {
-	return FilesystemSnapshot{}, errors.New("not implemented")
+type NetworkSampler struct {
+	previous   map[uint32]networkState
+	previousAt time.Time
 }
