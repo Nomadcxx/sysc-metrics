@@ -190,16 +190,6 @@ func (s *NetworkSampler) Sample() (NetworkSnapshot, error) {
 	return NetworkSnapshot{}, errors.New("not implemented")
 }
 
-// ReadMemory returns one memory and swap snapshot from Linux.
-func ReadMemory() (MemorySnapshot, error) {
-	return MemorySnapshot{}, errors.New("not implemented")
-}
-
-// ReadUptime returns one uptime snapshot from Linux.
-func ReadUptime() (UptimeSnapshot, error) {
-	return UptimeSnapshot{}, errors.New("not implemented")
-}
-
 // ReadFilesystems returns one mounted-filesystem snapshot from Linux.
 func ReadFilesystems() (FilesystemSnapshot, error) {
 	return FilesystemSnapshot{}, errors.New("not implemented")
