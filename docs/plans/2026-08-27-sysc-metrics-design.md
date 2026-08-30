@@ -58,5 +58,15 @@ repository.
 
 Fixture tests cover parsers and discontinuities. Linux integration tests compare invariants rather than
 machine-specific values: totals are non-negative, used capacity does not exceed the valid total, and a
-removed device disappears without corrupting another device's result. The `v0.1.0` gate includes
-suspend/resume and UPower-to-sysfs fallback on real hardware.
+removed device disappears without corrupting another device's result.
+
+Release gates are per milestone, because a gate may only require evidence for what its release
+actually ships.
+
+- **`v0.1.0` — core counters.** The automated gate green with the race detector, zero dependencies, an
+  audit of the public API against this design, and the Linux invariant test passing on real hardware.
+  Amended 2026-08-31: this gate previously also named suspend/resume and UPower-to-sysfs fallback,
+  which are power collectors this release does not contain. Requiring evidence for unbuilt code would
+  have made the gate unmeetable rather than strict.
+- **`v0.2.0` — power and thermal.** Everything above, plus suspend/resume and UPower-to-sysfs fallback
+  on real hardware, multi-battery, and source-transition handling.
