@@ -183,3 +183,36 @@ type NetworkSampler struct {
 	previous   map[uint32]networkState
 	previousAt time.Time
 }
+
+// BatteryState is the charging state of the aggregate battery.
+type BatteryState uint8
+
+const (
+	BatteryUnknown BatteryState = iota
+	BatteryCharging
+	BatteryDischarging
+	BatteryFull
+)
+
+// BatterySnapshot is the aggregate battery observation. Present is false on a
+// machine with no battery; that is not an error.
+type BatterySnapshot struct {
+	CollectedAt   time.Time
+	Present       bool
+	Charge        float64 // 0..1
+	ChargeValid   bool
+	State         BatteryState
+	EnergyJoules  float64
+	RateWatts     float64
+	RateValid     bool
+	TimeRemaining time.Duration
+	TimeValid     bool
+	Issues        []Issue
+}
+
+// ReadBattery collects the current aggregate battery. It prefers sysfs
+// power-supply devices of type Battery or UPS. A machine with none reports
+// Present false.
+func ReadBattery() (BatterySnapshot, error) {
+	return readBattery(powerSupplyRoot)
+}
