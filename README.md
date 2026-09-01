@@ -4,7 +4,8 @@
 monitoring widgets in [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) without importing a CLI,
 TUI, HTTP server, or unrelated application framework.
 
-The M0 contract and M1 core collectors are implemented.
+The M0 contract, M1 core collectors, sysfs battery, CPU temperature, and GPU
+usage/temperature are implemented. Process sampling is not.
 
 ## Usage
 
@@ -48,8 +49,11 @@ The first releases will collect:
 - uptime and basic totals;
 - process CPU and memory only when a consumer requests it.
 
-UPower supplies the preferred battery aggregate. `/sys/class/power_supply` provides the fallback.
-Collectors use Linux interfaces such as `/proc`, `/sys`, `statfs`, and D-Bus directly.
+Battery is the sysfs power-supply aggregate. CPU temperature is one scored
+hwmon / thermal_zone reading. GPU usage and temperature come from drm sysfs,
+with NVIDIA falling back to `nvidia-smi` when a `10de:` device is present.
+Collectors use Linux interfaces such as `/proc`, `/sys`, `statfs`, and
+`os/exec` for that optional NVIDIA binary.
 
 The library will not provide power controls, recursive directory sizes, filesystem indexing, SMART,
 quotas, vendor administration, a daemon, or cross-platform abstractions.

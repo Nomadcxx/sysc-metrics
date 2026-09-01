@@ -257,5 +257,5 @@ type GPUSnapshot struct {
 
 // ReadGPU collects usage and temperature for each discrete or integrated GPU.
 func ReadGPU() (GPUSnapshot, error) {
-	return GPUSnapshot{CollectedAt: time.Now()}, nil
+	return readGPU(drmRoot, pciIDsPaths, nvidiaSMI)
 }

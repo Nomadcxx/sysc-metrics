@@ -78,6 +78,27 @@ func TestLinuxIntegration(t *testing.T) {
 		}
 	}
 
+	thermal, err := ReadThermal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thermal.Valid && (thermal.Celsius <= 0 || thermal.Celsius >= 150) {
+		t.Fatalf("CPU temperature out of range: %#v", thermal)
+	}
+
+	gpus, err := ReadGPU()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range gpus.GPUs {
+		if g.Usage.Valid {
+			assertFraction(t, "GPU usage", g.Usage.Fraction)
+		}
+		if g.TempValid && (g.Celsius <= 0 || g.Celsius >= 150) {
+			t.Fatalf("GPU temperature out of range: %#v", g)
+		}
+	}
+
 	if testing.Short() {
 		return
 	}
