@@ -229,7 +229,7 @@ type ThermalSnapshot struct {
 
 // ReadThermal collects the current CPU package temperature.
 func ReadThermal() (ThermalSnapshot, error) {
-	return ThermalSnapshot{CollectedAt: time.Now()}, nil
+	return readThermal(hwmonRoot, thermalZoneRoot)
 }
 
 // GPUUsage is a 0..1 busy fraction. Valid distinguishes a real zero from no sample.
