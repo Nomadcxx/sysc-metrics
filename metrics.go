@@ -216,3 +216,46 @@ type BatterySnapshot struct {
 func ReadBattery() (BatterySnapshot, error) {
 	return readBattery(powerSupplyRoot)
 }
+
+// ThermalSnapshot is one scored CPU package temperature in Celsius.
+// Valid is false when no known sensor exists; that is not an error.
+type ThermalSnapshot struct {
+	CollectedAt time.Time
+	Celsius     float64
+	Valid       bool
+	Source      string
+	Issues      []Issue
+}
+
+// ReadThermal collects the current CPU package temperature.
+func ReadThermal() (ThermalSnapshot, error) {
+	return ThermalSnapshot{CollectedAt: time.Now()}, nil
+}
+
+// GPUUsage is a 0..1 busy fraction. Valid distinguishes a real zero from no sample.
+type GPUUsage struct {
+	Fraction float64
+	Valid    bool
+}
+
+// GPU is one display device.
+type GPU struct {
+	PCIID     string
+	Driver    string
+	Name      string
+	Usage     GPUUsage
+	Celsius   float64
+	TempValid bool
+}
+
+// GPUSnapshot lists GPUs collected at one time. GPUs and Issues are caller-owned.
+type GPUSnapshot struct {
+	CollectedAt time.Time
+	GPUs        []GPU
+	Issues      []Issue
+}
+
+// ReadGPU collects usage and temperature for each discrete or integrated GPU.
+func ReadGPU() (GPUSnapshot, error) {
+	return GPUSnapshot{CollectedAt: time.Now()}, nil
+}

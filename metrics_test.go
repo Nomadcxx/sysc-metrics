@@ -18,6 +18,9 @@ var (
 	_ func(*BlockSampler) (BlockSnapshot, error)     = (*BlockSampler).Sample
 	_ func() *NetworkSampler                         = NewNetworkSampler
 	_ func(*NetworkSampler) (NetworkSnapshot, error) = (*NetworkSampler).Sample
+	_ func() (ThermalSnapshot, error)                = ReadThermal
+	_ func() (GPUSnapshot, error)                    = ReadGPU
+	_ func() (BatterySnapshot, error)                = ReadBattery
 )
 
 func TestIssueWrapsSourceAndCause(t *testing.T) {
@@ -38,8 +41,12 @@ func TestPublicValueTypesHaveInvalidDerivedZeroValues(t *testing.T) {
 	var snapshot CPUSnapshot
 	var block BlockRates
 	var network NetworkRates
+	var thermal ThermalSnapshot
+	var gpuUsage GPUUsage
+	var gpu GPU
 
-	if cpu.Valid || core.FrequencyValid || snapshot.LoadValid || block.Valid || network.Valid {
+	if cpu.Valid || core.FrequencyValid || snapshot.LoadValid || block.Valid || network.Valid ||
+		thermal.Valid || gpuUsage.Valid || gpu.TempValid {
 		t.Fatal("derived validity flags must default to false")
 	}
 
