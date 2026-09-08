@@ -4,8 +4,8 @@
 monitoring widgets in [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) without importing a CLI,
 TUI, HTTP server, or unrelated application framework.
 
-The M0 contract, M1 core collectors, sysfs battery, CPU temperature, and GPU
-usage/temperature are implemented. Process sampling is not.
+The M0 contract, M1 core collectors, sysfs battery, CPU temperature, GPU
+usage/temperature, and opt-in process sampling are implemented.
 
 ## Usage
 

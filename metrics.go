@@ -184,6 +184,45 @@ type NetworkSampler struct {
 	previousAt time.Time
 }
 
+// ProcessIdentity distinguishes a process from a later process that reuses its PID.
+type ProcessIdentity struct {
+	PID            int
+	StartTimeTicks uint64
+}
+
+// Process contains one process observation and its best-effort derived CPU usage.
+type Process struct {
+	Identity      ProcessIdentity
+	Name          string
+	ParentPID     int
+	UID           uint32
+	UIDValid      bool
+	ResidentBytes uint64
+	ResidentValid bool
+	Args          []string
+	CPU           CPUUsage
+}
+
+// ProcessSnapshot contains processes collected at one time. Processes, Args,
+// and Issues are caller-owned snapshot slices.
+type ProcessSnapshot struct {
+	CollectedAt time.Time
+	Processes   []Process
+	Issues      []Issue
+}
+
+// ProcessSampler retains previous process and aggregate CPU counters for
+// sequential rate sampling.
+type ProcessSampler struct {
+	root          string
+	previousTotal uint64
+	previous      map[ProcessIdentity]uint64
+	hasPrevious   bool
+}
+
+// NewProcessSampler returns a process sampler owned by one sequential polling caller.
+func NewProcessSampler() *ProcessSampler { return newProcessSampler("/proc") }
+
 // BatteryState is the charging state of the aggregate battery.
 type BatteryState uint8
 

@@ -21,6 +21,9 @@ var (
 	_ func() (ThermalSnapshot, error)                = ReadThermal
 	_ func() (GPUSnapshot, error)                    = ReadGPU
 	_ func() (BatterySnapshot, error)                = ReadBattery
+	_ func() *ProcessSampler                         = NewProcessSampler
+	_ func(*ProcessSampler) (ProcessSnapshot, error) = (*ProcessSampler).Sample
+	_ func(ProcessIdentity) error                    = ValidateProcessIdentity
 )
 
 func TestIssueWrapsSourceAndCause(t *testing.T) {
@@ -44,6 +47,7 @@ func TestPublicValueTypesHaveInvalidDerivedZeroValues(t *testing.T) {
 	var thermal ThermalSnapshot
 	var gpuUsage GPUUsage
 	var gpu GPU
+	var process Process
 
 	if cpu.Valid || core.FrequencyValid || snapshot.LoadValid || block.Valid || network.Valid ||
 		thermal.Valid || gpuUsage.Valid || gpu.TempValid {
@@ -59,4 +63,6 @@ func TestPublicValueTypesHaveInvalidDerivedZeroValues(t *testing.T) {
 	_ = BlockSnapshot{}
 	_ = NetworkInterface{}
 	_ = NetworkSnapshot{}
+	_ = process.Identity
+	_ = ProcessSnapshot{}
 }
