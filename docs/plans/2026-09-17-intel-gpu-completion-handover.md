@@ -13,7 +13,8 @@ Design amendment: `docs/plans/2026-09-02-thermal-and-gpu-design.md`
 stateful `GPUSampler`. The existing public contract is preserved: `GPU`,
 `GPUUsage`, `GPUSnapshot`, and `ReadGPU` are source-compatible, and `ReadGPU`
 still never reports Intel usage. The tag for the shell to consume is
-`v0.5.0`.
+`v0.5.1`, which supersedes `v0.5.0` (the audit below found `v0.5.0`'s counter
+descriptors were not close-on-exec; do not pin `v0.5.0`).
 
 ## API contract for the shell
 
@@ -122,6 +123,34 @@ second sample: PCIID=8086:3ea0 fraction=0.021866545483376656 valid=true
 - Engine sets differ across kernels and generations; discovery is fully
   runtime-driven and nothing above is hard-coded.
 
+## Audit and re-qualification
+
+An independent audit (commission:
+`2026-09-17-intel-gpu-audit-commission.md`; report:
+`2026-09-17-intel-gpu-audit-report.md`) reproduced nine of ten claim groups
+and filed two defects, both fixed on `main`:
+
+- **F1 (Moderate).** `PERF_FLAG_FD_CLOEXEC` had been written into the
+  `perf_event_attr` bitfield (offset 40, bit 3 = `exclusive`) while the
+  syscall's flags argument received `0`: counter descriptors were **not**
+  close-on-exec and every event requested exclusive use. On a hybrid
+  Intel+NVIDIA machine the counters leaked into exec'd `nvidia-smi`
+  children — exactly what this document promised could not happen. Fixed in
+  `1e2e806`: the flag rides the `perf_event_open` flags argument,
+  `attr.Flags` stays zero. Regression tests: flag routing (unprivileged),
+  syscall-flags CLOEXEC end-to-end (unprivileged), and the production path
+  `TestAuditF1OpenGPUCounterIsCloseOnExec` (privileged).
+- **F2 (Low).** The linkless-PMU fallback was all-or-nothing on the presence
+  of any linked candidate. It now applies per candidate: the single unclaimed
+  GPU carrying the driver maps when exactly one unclaimed linkless
+  driver-named candidate remains. Ambiguity still never maps.
+
+Re-qualification on the target laptop with the fixed code (full package under
+sudo, commit `1e2e806`): every test passes, the production-path CLOEXEC test
+passes, and `TestIntelGPULive` reports first sample invalid and second sample
+`fraction=0.11954942390818976 valid=true` — the counters open without the
+accidental `exclusive` attribute.
+
 ## Boundary
 
 Only the `i915` driver is supported. The `xe` driver may expose a different
@@ -155,8 +184,8 @@ How this work addresses each section of the commissioning handover.
 | Publish next additive release, not a moving branch | Tag `v0.5.0` on `f091241` |
 | Completion handover with hashes, gates, tag, migration contract | This document |
 
-Deviations worth noting: `AGENTS.md` named in the commission's reading list
-does not exist in this repository (conventions were taken from `README.md`
+Deviations worth noting: the conventions file named in the commission's reading
+list does not exist in this repository (conventions were taken from `README.md`
 and the existing code), and the shell consumer file was outside this
 commission's readable workspace, so the shell ownership contract was taken
 from the commissioning handover's own text.
