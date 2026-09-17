@@ -4,6 +4,8 @@ package metrics
 
 import (
 	"math"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -158,6 +160,86 @@ func TestLinuxIntegration(t *testing.T) {
 	if err := gpuSampler.Close(); err != nil {
 		t.Fatalf("second GPUSampler.Close = %v", err)
 	}
+}
+
+// TestIntelGPULive qualifies the i915 PMU sampler on real Intel hardware.
+// It is opt-in because reading the counters may require elevated privileges:
+// run with SYSC_METRICS_INTEL_GPU_LIVE=1 on a machine with an i915 GPU.
+func TestIntelGPULive(t *testing.T) {
+	if os.Getenv("SYSC_METRICS_INTEL_GPU_LIVE") != "1" {
+		t.Skip("opt-in: set SYSC_METRICS_INTEL_GPU_LIVE=1 on a machine with an Intel i915 GPU")
+	}
+	var uts syscall.Utsname
+	if err := syscall.Uname(&uts); err == nil {
+		t.Logf("kernel release: %s", utsField(uts.Release[:]))
+	}
+	sampler := NewGPUSampler()
+	first, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstIntel := i915GPUs(first)
+	if len(firstIntel) == 0 {
+		t.Skip("no Intel i915 GPU on this machine")
+	}
+	logDiscoveredPMU(t, sampler)
+	for _, g := range firstIntel {
+		t.Logf("first sample: PCIID=%s driver=%s temp=%v tempValid=%v usageValid=%v",
+			g.PCIID, g.Driver, g.Celsius, g.TempValid, g.Usage.Valid)
+		if g.Usage.Valid {
+			t.Fatalf("first sample has valid usage: %#v", g.Usage)
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range i915GPUs(second) {
+		t.Logf("second sample: PCIID=%s fraction=%v valid=%v",
+			g.PCIID, g.Usage.Fraction, g.Usage.Valid)
+		if !g.Usage.Valid {
+			t.Fatalf("second sample usage is invalid (issues: %v); if they are EACCES or EPERM, rerun with CAP_PERFMON or CAP_SYS_ADMIN, or with kernel.perf_event_paranoid <= 1", second.Issues)
+		}
+		assertFraction(t, "Intel GPU usage", g.Usage.Fraction)
+	}
+	if len(second.Issues) > 0 {
+		t.Logf("issues: %v", second.Issues)
+	}
+	if err := sampler.Close(); err != nil {
+		t.Fatalf("Close = %v", err)
+	}
+}
+
+func i915GPUs(snapshot GPUSnapshot) []GPU {
+	var intel []GPU
+	for _, g := range snapshot.GPUs {
+		if g.Driver == "i915" {
+			intel = append(intel, g)
+		}
+	}
+	return intel
+}
+
+func logDiscoveredPMU(t *testing.T, sampler *GPUSampler) {
+	t.Helper()
+	for _, state := range sampler.engines {
+		t.Logf("PMU %s root=%s type=%d BDF=%q", state.pmu.name, state.pmu.root, state.pmu.pmuType, state.pmu.bdf)
+		for _, engine := range state.engines {
+			t.Logf("  engine %s config=0x%x", engine.event.name, engine.event.config)
+		}
+	}
+}
+
+func utsField(field []int8) string {
+	bytes := make([]byte, 0, len(field))
+	for _, c := range field {
+		if c == 0 {
+			break
+		}
+		bytes = append(bytes, byte(c))
+	}
+	return string(bytes)
 }
 
 func networkIdentityValid(iface NetworkInterface, issues []Issue) bool {
