@@ -104,10 +104,15 @@ func discoverGPUPMUs(devicesRoot, driver string) ([]pmuCandidate, []Issue) {
 	var issues []Issue
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() || name != driver && !strings.HasPrefix(name, driver+"_") {
+		if name != driver && !strings.HasPrefix(name, driver+"_") {
 			continue
 		}
 		root := filepath.Join(devicesRoot, name)
+		// The entries under /sys/bus/event_source/devices are symlinks, so
+		// the directory check must follow them.
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			continue
+		}
 		body, err := os.ReadFile(filepath.Join(root, "type"))
 		if err != nil {
 			issues = append(issues, Issue{Source: filepath.Join(root, "type"), Err: err})

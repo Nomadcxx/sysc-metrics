@@ -157,6 +157,22 @@ func TestPMUDiscoversCandidatesByDriverName(t *testing.T) {
 	}
 }
 
+func TestPMUDiscoversSymlinkedPMUDir(t *testing.T) {
+	realRoot := t.TempDir()
+	writePMU(t, realRoot, "i915", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	devicesRoot := t.TempDir()
+	if err := os.Symlink(filepath.Join(realRoot, "i915"), filepath.Join(devicesRoot, "i915")); err != nil {
+		t.Fatal(err)
+	}
+	candidates, issues := discoverGPUPMUs(devicesRoot, "i915")
+	if len(issues) != 0 {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if len(candidates) != 1 || candidates[0].pmuType != 13 || candidates[0].bdf != "" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+}
+
 func TestPMUMissingTypeOrEventsIsAnIssue(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "i915"), 0o755); err != nil {
