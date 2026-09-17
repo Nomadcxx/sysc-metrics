@@ -298,3 +298,27 @@ type GPUSnapshot struct {
 func ReadGPU() (GPUSnapshot, error) {
 	return readGPU(drmRoot, pciIDsPaths, nvidiaSMI)
 }
+
+// GPUSampler retains Intel i915 PMU engine counters for sequential rate
+// sampling. It is owned by one sequential polling caller, starts no
+// goroutines, and owns open PMU counters until Close. ReadGPU cannot report
+// Intel usage; a consumer that needs it must sample here and close the
+// sampler when its polling stops.
+type GPUSampler struct {
+	drmRoot     string
+	pmuRoot     string
+	pciIDs      []string
+	smi         func() ([]byte, error)
+	now         func() time.Time
+	open        func(pmuType, config uint64) (gpuCounter, error)
+	engines     map[string]*gpuPMUState
+	hasPrevious bool
+	previousAt  time.Time
+}
+
+// NewGPUSampler returns a GPU sampler owned by one sequential polling caller.
+// It reports the same snapshot as ReadGPU and additionally fills Intel i915
+// usage from the second sample on.
+func NewGPUSampler() *GPUSampler {
+	return newGPUSampler(drmRoot, pmuDevicesRoot, pciIDsPaths, nvidiaSMI)
+}

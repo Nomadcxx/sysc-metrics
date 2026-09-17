@@ -20,6 +20,9 @@ var (
 	_ func(*NetworkSampler) (NetworkSnapshot, error) = (*NetworkSampler).Sample
 	_ func() (ThermalSnapshot, error)                = ReadThermal
 	_ func() (GPUSnapshot, error)                    = ReadGPU
+	_ func() *GPUSampler                             = NewGPUSampler
+	_ func(*GPUSampler) (GPUSnapshot, error)         = (*GPUSampler).Sample
+	_ func(*GPUSampler) error                        = (*GPUSampler).Close
 	_ func() (BatterySnapshot, error)                = ReadBattery
 	_ func() *ProcessSampler                         = NewProcessSampler
 	_ func(*ProcessSampler) (ProcessSnapshot, error) = (*ProcessSampler).Sample

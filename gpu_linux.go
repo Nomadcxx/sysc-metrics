@@ -5,6 +5,8 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +16,10 @@ import (
 	"time"
 )
 
-const drmRoot = "/sys/class/drm"
+const (
+	drmRoot        = "/sys/class/drm"
+	pmuDevicesRoot = "/sys/bus/event_source/devices"
+)
 
 var pciIDsPaths = []string{
 	"/usr/share/hwdata/pci.ids",
@@ -30,13 +35,18 @@ type gpuFound struct {
 }
 
 func readGPU(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUSnapshot, error) {
+	snapshot, _, err := readGPUs(drmRoot, pciIDs, smi)
+	return snapshot, err
+}
+
+func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUSnapshot, []gpuFound, error) {
 	now := time.Now()
 	entries, err := os.ReadDir(drmRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return GPUSnapshot{CollectedAt: now}, nil
+			return GPUSnapshot{CollectedAt: now}, nil, nil
 		}
-		return GPUSnapshot{}, err
+		return GPUSnapshot{}, nil, err
 	}
 
 	var (
@@ -106,7 +116,7 @@ func readGPU(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUSn
 	for i, g := range found {
 		out[i] = g.gpu
 	}
-	return GPUSnapshot{CollectedAt: now, GPUs: out, Issues: issues}, nil
+	return GPUSnapshot{CollectedAt: now, GPUs: out, Issues: issues}, found, nil
 }
 
 func gpuDriver(dev string) string {
@@ -266,4 +276,172 @@ func runNvidiaSMI() ([]byte, error) {
 		"--query-gpu=pci.bus_id,utilization.gpu,temperature.gpu,name",
 		"--format=csv,noheader,nounits")
 	return cmd.Output()
+}
+
+type gpuEngineState struct {
+	event    pmuEvent
+	counter  gpuCounter
+	value    uint64
+	hasValue bool
+}
+
+type gpuPMUState struct {
+	pmu     pmuCandidate
+	engines []gpuEngineState
+}
+
+func newGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]byte, error)) *GPUSampler {
+	return &GPUSampler{
+		drmRoot: drmRoot,
+		pmuRoot: pmuRoot,
+		pciIDs:  pciIDs,
+		smi:     smi,
+		now:     time.Now,
+		open:    openGPUCounter,
+		engines: make(map[string]*gpuPMUState),
+	}
+}
+
+// Sample returns one GPU snapshot. The sampler is not safe for concurrent use.
+func (s *GPUSampler) Sample() (GPUSnapshot, error) {
+	now := s.now()
+	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi)
+	if err != nil {
+		return GPUSnapshot{}, err
+	}
+	s.applyIntelPMU(now, found, &snapshot)
+	return snapshot, nil
+}
+
+// Close closes every open PMU counter and drops sampling state. It is
+// idempotent; sampling after Close starts from a fresh baseline.
+func (s *GPUSampler) Close() error {
+	var closeErr error
+	for _, state := range s.engines {
+		if err := state.closeCounters(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+	}
+	s.engines = make(map[string]*gpuPMUState)
+	s.hasPrevious = false
+	return closeErr
+}
+
+// applyIntelPMU layers i915 PMU engine usage onto the DRM snapshot. State is
+// keyed by PCI BDF; engines of GPUs that disappeared are closed and dropped,
+// so a reappearance starts from a fresh baseline.
+func (s *GPUSampler) applyIntelPMU(now time.Time, found []gpuFound, snapshot *GPUSnapshot) {
+	elapsed := time.Duration(0)
+	if s.hasPrevious {
+		elapsed = now.Sub(s.previousAt)
+	}
+	var refs []gpuRef
+	var intel []int
+	for i, f := range found {
+		if f.gpu.Driver == "i915" {
+			intel = append(intel, i)
+			refs = append(refs, gpuRef{bdf: f.bdf, driver: f.gpu.Driver})
+		}
+	}
+	present := make(map[string]bool, len(intel))
+	if len(intel) > 0 {
+		candidates, issues := discoverGPUPMUs(s.pmuRoot, "i915")
+		snapshot.Issues = append(snapshot.Issues, issues...)
+		mapped := mapGPUPMUs(refs, candidates)
+		for k, i := range intel {
+			f := &found[i]
+			if mapped[k] < 0 {
+				snapshot.Issues = append(snapshot.Issues, Issue{
+					Source: filepath.Join(s.pmuRoot, f.gpu.Driver),
+					Err:    fmt.Errorf("no %s PMU mapped for GPU %s", f.gpu.Driver, f.bdf),
+				})
+				continue
+			}
+			present[f.bdf] = true
+			state, ok := s.engines[f.bdf]
+			if !ok {
+				var issues []Issue
+				state, issues = newGPUPMUState(candidates[mapped[k]])
+				s.engines[f.bdf] = state
+				snapshot.Issues = append(snapshot.Issues, issues...)
+			}
+			s.sampleGPU(state, &snapshot.GPUs[i], elapsed, snapshot)
+		}
+	}
+	for key, state := range s.engines {
+		if !present[key] {
+			_ = state.closeCounters()
+			delete(s.engines, key)
+		}
+	}
+	s.hasPrevious = true
+	s.previousAt = now
+}
+
+func newGPUPMUState(pmu pmuCandidate) (*gpuPMUState, []Issue) {
+	events, issues := discoverBusyEvents(pmu.root)
+	state := &gpuPMUState{pmu: pmu, engines: make([]gpuEngineState, len(events))}
+	for i, event := range events {
+		state.engines[i] = gpuEngineState{event: event}
+	}
+	return state, issues
+}
+
+// sampleGPU reads every engine counter of one mapped GPU. Any open failure,
+// read failure, or rebaseline leaves that sample's usage invalid; partial
+// engine data never fabricates a device-wide percentage.
+func (s *GPUSampler) sampleGPU(state *gpuPMUState, gpu *GPU, elapsed time.Duration, snapshot *GPUSnapshot) {
+	if len(state.engines) == 0 {
+		snapshot.Issues = append(snapshot.Issues, Issue{
+			Source: filepath.Join(state.pmu.root, "events"),
+			Err:    errors.New("no *-busy events"),
+		})
+		return
+	}
+	valid := true
+	var fractions []float64
+	for i := range state.engines {
+		engine := &state.engines[i]
+		source := filepath.Join(state.pmu.root, "events", engine.event.name+"-busy")
+		if engine.counter == nil {
+			counter, err := s.open(state.pmu.pmuType, engine.event.config)
+			if err != nil {
+				snapshot.Issues = append(snapshot.Issues, Issue{Source: source, Err: err})
+				valid = false
+				continue
+			}
+			engine.counter = counter
+			engine.hasValue = false
+		}
+		value, err := engine.counter.read()
+		if err != nil {
+			snapshot.Issues = append(snapshot.Issues, Issue{Source: source, Err: err})
+			engine.hasValue = false
+			valid = false
+			continue
+		}
+		if fraction, ok := engineBusy(engine.value, value, engine.hasValue, elapsed); ok {
+			fractions = append(fractions, fraction)
+		} else {
+			valid = false
+		}
+		engine.value, engine.hasValue = value, true
+	}
+	if valid {
+		gpu.Usage = GPUUsage{Fraction: maxBusyFraction(fractions), Valid: true}
+	}
+}
+
+func (st *gpuPMUState) closeCounters() error {
+	var closeErr error
+	for i := range st.engines {
+		if st.engines[i].counter == nil {
+			continue
+		}
+		if err := st.engines[i].counter.close(); err != nil && closeErr == nil {
+			closeErr = err
+		}
+		st.engines[i].counter = nil
+	}
+	return closeErr
 }

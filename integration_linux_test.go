@@ -99,6 +99,20 @@ func TestLinuxIntegration(t *testing.T) {
 		}
 	}
 
+	gpuSampler := NewGPUSampler()
+	firstGPUSample, err := gpuSampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range firstGPUSample.GPUs {
+		if g.Usage.Valid {
+			assertFraction(t, "GPU sampler usage", g.Usage.Fraction)
+		}
+		if g.TempValid && (g.Celsius <= 0 || g.Celsius >= 150) {
+			t.Fatalf("GPU sampler temperature out of range: %#v", g)
+		}
+	}
+
 	if testing.Short() {
 		return
 	}
@@ -127,6 +141,23 @@ func TestLinuxIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkNetworkContinuity(t, firstNetwork, secondNetwork)
+
+	time.Sleep(100 * time.Millisecond)
+	secondGPUSample, err := gpuSampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range secondGPUSample.GPUs {
+		if g.Usage.Valid {
+			assertFraction(t, "GPU sampler usage", g.Usage.Fraction)
+		}
+	}
+	if err := gpuSampler.Close(); err != nil {
+		t.Fatalf("GPUSampler.Close = %v", err)
+	}
+	if err := gpuSampler.Close(); err != nil {
+		t.Fatalf("second GPUSampler.Close = %v", err)
+	}
 }
 
 func networkIdentityValid(iface NetworkInterface, issues []Issue) bool {

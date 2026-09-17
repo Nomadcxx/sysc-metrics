@@ -3,13 +3,17 @@
 package metrics
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 // pmuEvent is one discovered engine-busy PMU event.
@@ -245,3 +249,70 @@ func maxBusyFraction(fractions []float64) float64 {
 	}
 	return maximum
 }
+
+// gpuCounter is one open PMU event counter delivering monotonic readings.
+type gpuCounter interface {
+	read() (uint64, error)
+	close() error
+}
+
+const perfFlagFDCloexec = 1 << 3
+
+// perfEventAttr mirrors the ABI-0 perf_event_attr layout (64 bytes).
+type perfEventAttr struct {
+	Type         uint32
+	Size         uint32
+	Config       uint64
+	SamplePeriod uint64
+	SampleType   uint64
+	ReadFormat   uint64
+	Flags        uint64
+	WakeupEvents uint32
+	BpType       uint32
+	BpAddr       uint64
+}
+
+var perfEventOpen = func(attr *perfEventAttr, pid, cpu, groupFd int, flags uint64) (int, error) {
+	fd, _, errno := syscall.Syscall6(syscall.SYS_PERF_EVENT_OPEN,
+		uintptr(unsafe.Pointer(attr)), uintptr(pid), uintptr(cpu),
+		uintptr(groupFd), uintptr(flags), 0)
+	if errno != 0 {
+		return -1, errno
+	}
+	return int(fd), nil
+}
+
+// openGPUCounter opens one PMU event counter, enabled and accumulating, for
+// the owning GPUSampler. The descriptor is close-on-exec so exec'd helpers
+// such as nvidia-smi never inherit it.
+func openGPUCounter(pmuType, config uint64) (gpuCounter, error) {
+	attr := perfEventAttr{
+		Type:   uint32(pmuType),
+		Size:   uint32(unsafe.Sizeof(perfEventAttr{})),
+		Config: config,
+		Flags:  perfFlagFDCloexec,
+	}
+	fd, err := perfEventOpen(&attr, -1, 0, -1, 0)
+	if err != nil {
+		return nil, fmt.Errorf("perf_event_open: %w", err)
+	}
+	return &perfCounter{file: os.NewFile(uintptr(fd), "perf_event")}, nil
+}
+
+type perfCounter struct {
+	file *os.File
+}
+
+func (c *perfCounter) read() (uint64, error) {
+	var buf [8]byte
+	n, err := c.file.Read(buf[:])
+	if err != nil {
+		return 0, err
+	}
+	if n != len(buf) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return binary.LittleEndian.Uint64(buf[:]), nil
+}
+
+func (c *perfCounter) close() error { return c.file.Close() }
