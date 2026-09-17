@@ -234,16 +234,17 @@ worse than no percentage.
 
 ### Permissions
 
-Measured on the target laptop (kernel 7.2.4-arch1-2, `perf_event_paranoid=2`, uid 1000, no
-`perf` or `intel_gpu_top` installed): `perf_event_open` on the i915 counters returns `EACCES`
-unprivileged, with and without `exclude_kernel`/`exclude_hv` flags. Reading i915 counters
-therefore requires `CAP_PERFMON` (or `CAP_SYS_ADMIN`) on the consumer binary, or
-`kernel.perf_event_paranoid <= 1`. The sampler reports the failure as an `Issue` and keeps the
-rest of the snapshot intact.
+Measured on the target laptop (kernel 7.2.4-arch1-2, uid 1000, no `perf` or `intel_gpu_top`
+installed): any system-wide `perf_event_open` (`pid=-1`) returns `EACCES` unprivileged — with and
+without `exclude_kernel`/`exclude_hv`, and at `kernel.perf_event_paranoid` 2 **and** 1. Only
+task-attached self-measurement remains unprivileged, and the i915 PMU rejects task attachment
+(`EINVAL`), so the GPU counters are unreachable without privilege. Reading i915 counters
+therefore requires `CAP_PERFMON` (or `CAP_SYS_ADMIN`) on the consumer binary. The sampler
+reports the failure as an `Issue` and keeps the rest of the snapshot intact.
 
 Observed PMU evidence (2026-09-17): PMU type `13`; format `i915_eventid: config:0-20`; busy
 events `rcs0-busy` (config 0x0), `bcs0-busy` (0x1000), `vcs0-busy` (0x2000), `vecs0-busy`
-(0x3000), all with unit `ns`. This PMU directory exposes no `device` link on this kernel, which
+(0x3000), all with unit `ns`. The PMU directory exposes no `device` link on this kernel, which
 is why the single-GPU mapping rule above exists.
 
 ### Driver boundary

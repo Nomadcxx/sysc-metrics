@@ -199,7 +199,7 @@ func TestIntelGPULive(t *testing.T) {
 		t.Logf("second sample: PCIID=%s fraction=%v valid=%v",
 			g.PCIID, g.Usage.Fraction, g.Usage.Valid)
 		if !g.Usage.Valid {
-			t.Fatalf("second sample usage is invalid (issues: %v); if they are EACCES or EPERM, rerun with CAP_PERFMON or CAP_SYS_ADMIN, or with kernel.perf_event_paranoid <= 1", second.Issues)
+			t.Fatalf("second sample usage is invalid (issues: %v); opening i915 counters requires CAP_PERFMON or CAP_SYS_ADMIN — on measured kernels lowering kernel.perf_event_paranoid does not grant unprivileged system-wide counters", second.Issues)
 		}
 		assertFraction(t, "Intel GPU usage", g.Usage.Fraction)
 	}
