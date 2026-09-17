@@ -200,8 +200,9 @@ func (s *GPUSampler) Close() error
    `Issue`, and a failed engine makes the whole GPU percentage invalid (see aggregation). Engine
    sets differ across kernel and GPU generations, so events are discovered at runtime, never
    hard-coded.
-5. Each engine counter is opened once (`pid=-1`, `cpu=0`, group=-1, disabled) and stays open
-   across `Sample` calls; values are read as 8-byte counters.
+5. Each engine counter is opened once, enabled and accumulating, close-on-exec
+   (`pid=-1`, `cpu=0`, group=-1) and stays open across `Sample` calls; values
+   are read as 8-byte counters.
 
 ### Aggregation
 

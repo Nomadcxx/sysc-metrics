@@ -18,13 +18,15 @@ import (
 )
 
 func main() {
-	snapshot, err := metrics.NewCPUSampler().Sample()
+	sampler := metrics.NewGPUSampler()
+	snapshot, err := sampler.Sample()
 	if err != nil {
 		panic(err)
 	}
 	if snapshot.Usage.Valid {
 		fmt.Println(snapshot.Usage.Fraction)
 	}
+	sampler.Close()
 }
 ```
 
@@ -32,6 +34,13 @@ M1 is Linux-only and uses only the Go standard library. Samplers belong to one s
 owner; they do not start goroutines. First and discontinuous rate samples have `Valid == false`, while
 valid zero values remain valid. A snapshot may contain partial data and `Issue` values for failed
 individual sources or entities.
+
+`GPUSampler` reports the same GPU snapshot as `ReadGPU` and additionally fills Intel i915 usage
+from the second sample on, derived from PMU engine-busy counters opened with `perf_event_open`.
+Reading those counters needs `CAP_PERFMON` (or `CAP_SYS_ADMIN`) on the process, or
+`kernel.perf_event_paranoid <= 1`; otherwise the sampler records an `Issue` and leaves Intel
+usage invalid while identity and temperature stay filled. `ReadGPU` never reports Intel usage.
+Close a `GPUSampler` when its polling stops; it owns open counter descriptors.
 
 Polling cadence, caching, presentation, units shown to users, alerts, and filtering remain consumer
 responsibilities.
@@ -51,9 +60,11 @@ The first releases will collect:
 
 Battery is the sysfs power-supply aggregate. CPU temperature is one scored
 hwmon / thermal_zone reading. GPU usage and temperature come from drm sysfs,
-with NVIDIA falling back to `nvidia-smi` when a `10de:` device is present.
-Collectors use Linux interfaces such as `/proc`, `/sys`, `statfs`, and
-`os/exec` for that optional NVIDIA binary.
+with AMD usage from `gpu_busy_percent`, NVIDIA falling back to `nvidia-smi`
+when a `10de:` device is present, and Intel i915 usage from PMU engine-busy
+counters through the stateful `GPUSampler`. Collectors use Linux interfaces
+such as `/proc`, `/sys`, `statfs`, and `os/exec` for that optional NVIDIA
+binary.
 
 The library will not provide power controls, recursive directory sizes, filesystem indexing, SMART,
 quotas, vendor administration, a daemon, or cross-platform abstractions.
