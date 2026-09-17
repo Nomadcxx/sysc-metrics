@@ -127,3 +127,36 @@ second sample: PCIID=8086:3ea0 fraction=0.021866545483376656 valid=true
 Only the `i915` driver is supported. The `xe` driver may expose a different
 PMU contract and is a separate driver-gated extension. No `intel_gpu_top`, no
 `perf` binary, no daemon, no CGO, no new module was introduced.
+
+## Commission coverage
+
+How this work addresses each section of the commissioning handover.
+
+| Commission requirement | Where it landed |
+|---|---|
+| Truthful Intel i915 utilization | `GPUSampler` (`metrics.go`, `gpu_linux.go`, `gpu_pmu_linux.go`) from i915 PMU engine-busy deltas; live-qualified above |
+| Preserve `GPU`/`GPUUsage`/`GPUSnapshot`/`ReadGPU` contract | Types untouched; `ReadGPU` body unchanged except the shared `readGPUs` refactor; `TestReadGPUKeepsIntelUsageInvalid` and the `metrics_test.go` compile assertions pin the API |
+| Smallest stateful sampler, recommended shape | `NewGPUSampler`/`Sample`/`Close` exactly as specified; synchronous, one sequential owner, explicit fd lifetime, no goroutine |
+| Shell stays on `v0.4.0`; no shell-side reader, `perf`, or `replace` | Nothing in `sysc-shell` was touched; the migration contract above waits for this tag |
+| Probe the kernel interface, record evidence | Read-only ssh probes: PMU type 13, `format/config:0-20`, four `*-busy` events with ns units, no PMU→PCI link, `perf_event_paranoid` 2 and 1, open/read variants; no sysctl change or install during probing |
+| Amend the thermal/GPU design + executable plan | Amendment 2026-09-17 in `2026-09-02-thermal-and-gpu-design.md`; `2026-09-17-intel-gpu-pmu.md` |
+| Failing tests first (parsing, delta, semantics) | `gpu_pmu_linux_test.go` written and watched failing before `gpu_pmu_linux.go`; sampler fixture tests watched failing before the integration commit; the symlink-discovery bug was regression-caught by a failing test before the fix (`1eadf20`) |
+| PMU→GPU mapping via device link, ambiguity unavailable | `mapGPUPMUs` with the measured no-link fallback rule; `TestPMUMaps*`, `TestPMUDoesNotMap*` |
+| Max-of-engines aggregation, never summed, no new UI field | `maxBusyFraction`; design amendment "Aggregation"; no new public field |
+| No `intel_gpu_top`/`perf`/daemon/CGO/dependency/frequency heuristic | `go.mod`/`go.sum` unchanged (gate); stdlib `syscall` shim only |
+| First-sample invalid, second valid, valid zero | `TestGPUSampler*` first/second-sample and zero tests; live PASS |
+| Decrease/reset/short read/non-positive/impossible rebaseline | `TestPMUEngineBusy*`, `TestGPUSamplerReadErrorRebaselinesAndRecovers`, `...CounterDecrease...`, `...ImpossibleDelta...` |
+| Missing PMU/events, `EPERM`/`EACCES` keep identity + `Issue`, never zero | `TestGPUSamplerMissingPMUIssuesAndKeepsIdentity`, `TestGPUSamplerOpenFailureKeepsIdentityAndIssues`; live unprivileged runs recorded |
+| Failed engine → no fabricated device-wide percentage (conservative rule) | `sampleGPU` invalidates the whole GPU on any engine failure; documented in the amendment "Aggregation" |
+| Removal closes/drops state, reappearance fresh | `TestGPUSamplerDeviceDisappearanceDropsState`; idempotent `Close` closes every counter (`TestGPUSamplerCloseIsIdempotentAndClosesCounters`) |
+| AMD/NVIDIA behavior, ordering, `nvidia-smi` injection stay green | Existing `gpu_linux_test.go` suite untouched and passing; `TestGPUSamplerPassesAMDThroughWithoutPMU`; `TestLinuxIntegration` |
+| Fraction finite in 0..1 when valid | `assertFraction` in integration + live checks; `TestPMUEngineBusyFractionStaysBounded` |
+| Opt-in live check with recorded evidence | `TestIntelGPULive`; outputs recorded in this document |
+| Publish next additive release, not a moving branch | Tag `v0.5.0` on `f091241` |
+| Completion handover with hashes, gates, tag, migration contract | This document |
+
+Deviations worth noting: `AGENTS.md` named in the commission's reading list
+does not exist in this repository (conventions were taken from `README.md`
+and the existing code), and the shell consumer file was outside this
+commission's readable workspace, so the shell ownership contract was taken
+from the commissioning handover's own text.
