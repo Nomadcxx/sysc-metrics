@@ -5,8 +5,10 @@ package metrics
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func writePMU(t *testing.T, devicesRoot, name, linkedBDF string, events, units map[string]string) string {
@@ -229,8 +231,11 @@ func TestPMUDoesNotMapAcrossDriversOrUnknownLinks(t *testing.T) {
 		{name: "i915_0000_99_99_9", driver: "i915", bdf: "0000:99:99.9"},
 	}
 	mapped := mapGPUPMUs(gpus, pmus)
-	if mapped[0] != -1 || mapped[1] != -1 {
-		t.Fatalf("mapped = %v", mapped)
+	if mapped[0] != -1 {
+		t.Fatalf("amdgpu mapped: %v", mapped)
+	}
+	if mapped[1] != 0 {
+		t.Fatalf("the linkless driver-named PMU must fall back to the lone i915 GPU, never to the unknown-linked candidate: %v", mapped)
 	}
 }
 
@@ -339,5 +344,70 @@ func TestPMUAggregationIsOrderStableMaximum(t *testing.T) {
 	}
 	if got := maxBusyFraction(nil); got != 0 {
 		t.Fatalf("max = %v", got)
+	}
+}
+
+func TestAuditF2LinklessSingleGPUStillMaps(t *testing.T) {
+	gpus := []gpuRef{{bdf: "0000:00:02.0", driver: "i915"}}
+	pmus := []pmuCandidate{
+		{name: "i915", driver: "i915", bdf: ""},
+		{name: "i915_0000_99_99_9", driver: "i915", bdf: "0000:99:99.9"},
+	}
+	mapped := mapGPUPMUs(gpus, pmus)
+	if mapped[0] != 0 {
+		t.Fatalf("F2: the only i915 GPU was left unmapped (%v) because an unrelated candidate had a device link", mapped)
+	}
+}
+
+func TestAuditF1OpenGPUCounterFlagRouting(t *testing.T) {
+	attr, flags := gpuCounterOpenArgs(13, 0x1000)
+	if attr == nil {
+		t.Fatal("attr is nil")
+	}
+	if attr.Size != uint32(unsafe.Sizeof(perfEventAttr{})) {
+		t.Fatalf("attr size = %d", attr.Size)
+	}
+	if attr.Flags != 0 {
+		t.Fatalf("F1: attr.Flags = %#x carries bits the attr bitfield does not define for flags (bit 3 is exclusive); CLOEXEC belongs in the syscall flags argument", attr.Flags)
+	}
+	if flags != perfFlagFDCloexec {
+		t.Fatalf("F1: syscall flags = %#x, want PERF_FLAG_FD_CLOEXEC", flags)
+	}
+}
+
+func TestAuditF1SyscallFlagsGiveCloseOnExec(t *testing.T) {
+	const excludeKernelHV = 1<<5 | 1<<6 // paranoid gate; orthogonal to CLOEXEC
+	attr := perfEventAttr{
+		Type:  1, // PERF_TYPE_SOFTWARE
+		Size:  uint32(unsafe.Sizeof(perfEventAttr{})),
+		Flags: excludeKernelHV,
+	}
+	fd, err := perfEventOpen(&attr, 0, -1, -1, perfFlagFDCloexec)
+	if err != nil {
+		t.Skipf("perf_event_open unavailable here: %v", err)
+	}
+	defer syscall.Close(fd)
+	got, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_GETFD), 0)
+	if errno != 0 {
+		t.Fatalf("fcntl(F_GETFD): %v", errno)
+	}
+	if got&uintptr(syscall.FD_CLOEXEC) == 0 {
+		t.Fatal("F1: syscall-flags CLOEXEC did not reach the descriptor")
+	}
+}
+
+func TestAuditF1OpenGPUCounterIsCloseOnExec(t *testing.T) {
+	counter, err := openGPUCounter(1, 0) // system-wide: needs CAP_PERFMON/CAP_SYS_ADMIN
+	if err != nil {
+		t.Skipf("openGPUCounter needs CAP_PERFMON/CAP_SYS_ADMIN: %v", err)
+	}
+	defer counter.close()
+	fd := int(counter.(*perfCounter).file.Fd())
+	got, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_GETFD), 0)
+	if errno != 0 {
+		t.Fatalf("fcntl(F_GETFD): %v", errno)
+	}
+	if got&uintptr(syscall.FD_CLOEXEC) == 0 {
+		t.Fatal("F1: openGPUCounter returned a non-close-on-exec descriptor")
 	}
 }

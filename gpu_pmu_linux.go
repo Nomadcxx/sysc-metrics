@@ -181,9 +181,10 @@ func discoverBusyEvents(pmuRoot string) ([]pmuEvent, []Issue) {
 }
 
 // mapGPUPMUs assigns each GPU the index of its PMU candidate, or -1. A PMU
-// with a device link maps by PCI BDF and driver. When no candidate carries a
-// link, a driver-named PMU may serve exactly one GPU carrying that driver;
-// ambiguity stays unmapped.
+// with a device link maps by PCI BDF and driver. A driver-named PMU without a
+// link may serve the single GPU carrying that driver that no link claimed,
+// when it is the only such candidate; per-device-named candidates stay
+// link-authoritative, and ambiguity stays unmapped.
 func mapGPUPMUs(gpus []gpuRef, candidates []pmuCandidate) []int {
 	mapped := make([]int, len(gpus))
 	for i := range mapped {
@@ -192,38 +193,38 @@ func mapGPUPMUs(gpus []gpuRef, candidates []pmuCandidate) []int {
 	if len(candidates) == 0 {
 		return mapped
 	}
-	hasLinks := false
-	for _, candidate := range candidates {
-		if candidate.bdf != "" {
-			hasLinks = true
-			break
-		}
-	}
+	driver := candidates[0].driver
 	claimed := make([]bool, len(candidates))
-	if hasLinks {
-		for i, gpu := range gpus {
-			for j, candidate := range candidates {
-				if claimed[j] || candidate.bdf == "" || candidate.driver != gpu.driver {
-					continue
-				}
-				if candidate.bdf == gpu.bdf {
-					mapped[i] = j
-					claimed[j] = true
-					break
-				}
+	for i, gpu := range gpus {
+		for j, candidate := range candidates {
+			if claimed[j] || candidate.bdf == "" || candidate.driver != gpu.driver {
+				continue
+			}
+			if candidate.bdf == gpu.bdf {
+				mapped[i] = j
+				claimed[j] = true
+				break
 			}
 		}
-		return mapped
 	}
-	driver := candidates[0].driver
-	matching := make([]int, 0, len(gpus))
+	unmapped := -1
+	unmappedCount := 0
 	for i, gpu := range gpus {
-		if gpu.driver == driver {
-			matching = append(matching, i)
+		if mapped[i] < 0 && gpu.driver == driver {
+			unmapped = i
+			unmappedCount++
 		}
 	}
-	if len(matching) == 1 && len(candidates) == 1 {
-		mapped[matching[0]] = 0
+	fallback := -1
+	fallbackCount := 0
+	for j, candidate := range candidates {
+		if !claimed[j] && candidate.bdf == "" && candidate.name == driver {
+			fallback = j
+			fallbackCount++
+		}
+	}
+	if unmappedCount == 1 && fallbackCount == 1 {
+		mapped[unmapped] = fallback
 	}
 	return mapped
 }
@@ -287,17 +288,23 @@ var perfEventOpen = func(attr *perfEventAttr, pid, cpu, groupFd int, flags uint6
 	return int(fd), nil
 }
 
+// gpuCounterOpenArgs builds the attr and syscall flags for one PMU counter.
+// PERF_FLAG_FD_CLOEXEC is only honoured as the perf_event_open flags
+// argument; the attr bitfield does not carry it (its bit 3 is exclusive).
+func gpuCounterOpenArgs(pmuType, config uint64) (*perfEventAttr, uint64) {
+	return &perfEventAttr{
+		Type:   uint32(pmuType),
+		Size:   uint32(unsafe.Sizeof(perfEventAttr{})),
+		Config: config,
+	}, perfFlagFDCloexec
+}
+
 // openGPUCounter opens one PMU event counter, enabled and accumulating, for
 // the owning GPUSampler. The descriptor is close-on-exec so exec'd helpers
 // such as nvidia-smi never inherit it.
 func openGPUCounter(pmuType, config uint64) (gpuCounter, error) {
-	attr := perfEventAttr{
-		Type:   uint32(pmuType),
-		Size:   uint32(unsafe.Sizeof(perfEventAttr{})),
-		Config: config,
-		Flags:  perfFlagFDCloexec,
-	}
-	fd, err := perfEventOpen(&attr, -1, 0, -1, 0)
+	attr, flags := gpuCounterOpenArgs(pmuType, config)
+	fd, err := perfEventOpen(attr, -1, 0, -1, flags)
 	if err != nil {
 		return nil, fmt.Errorf("perf_event_open: %w", err)
 	}
