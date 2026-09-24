@@ -91,6 +91,11 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUS
 		if busy, err := readSysfsInt(filepath.Join(dev, "gpu_busy_percent")); err == nil {
 			g.Usage = GPUUsage{Fraction: float64(busy) / 100, Valid: true}
 		}
+		if used, err := readSysfsUint(filepath.Join(dev, "mem_info_vram_used")); err == nil {
+			if total, err := readSysfsUint(filepath.Join(dev, "mem_info_vram_total")); err == nil {
+				g.VRAM, g.VRAMValid = vramCapacity(used, total)
+			}
+		}
 		if c, ok := readGPUHwmonTemp(dev); ok {
 			g.Celsius, g.TempValid = c, true
 		}
@@ -117,6 +122,19 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUS
 		out[i] = g.gpu
 	}
 	return GPUSnapshot{CollectedAt: now, GPUs: out, Issues: issues}, found, nil
+}
+
+// vramCapacity builds a Capacity from used and total bytes. A zero total is
+// not a device with no memory; it is a driver that did not report one.
+func vramCapacity(used, total uint64) (Capacity, bool) {
+	if total == 0 {
+		return Capacity{}, false
+	}
+	c := Capacity{TotalBytes: total, UsedBytes: used}
+	if used < total {
+		c.AvailableBytes = total - used
+	}
+	return c, true
 }
 
 func gpuDriver(dev string) string {

@@ -73,6 +73,45 @@ func TestGPUReadsAmdBusyAndTempAndSkipsSimpleDRM(t *testing.T) {
 	}
 }
 
+func TestGPUReadsAmdVRAM(t *testing.T) {
+	tests := []struct {
+		name      string
+		files     map[string]string
+		wantValid bool
+		want      Capacity
+	}{
+		{"discrete", map[string]string{
+			"mem_info_vram_used":  "1073741824",
+			"mem_info_vram_total": "8589934592",
+		}, true, Capacity{TotalBytes: 8589934592, UsedBytes: 1073741824, AvailableBytes: 7516192768}},
+		{"apu carve-out reported as is", map[string]string{
+			"mem_info_vram_used":  "268435456",
+			"mem_info_vram_total": "536870912",
+		}, true, Capacity{TotalBytes: 536870912, UsedBytes: 268435456, AvailableBytes: 268435456}},
+		{"total missing", map[string]string{"mem_info_vram_used": "1"}, false, Capacity{}},
+		{"total zero", map[string]string{"mem_info_vram_used": "1", "mem_info_vram_total": "0"}, false, Capacity{}},
+		{"used above total clamps available", map[string]string{
+			"mem_info_vram_used":  "9",
+			"mem_info_vram_total": "8",
+		}, true, Capacity{TotalBytes: 8, UsedBytes: 9, AvailableBytes: 0}},
+		{"no files", nil, false, Capacity{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeDRMCard(t, root, "card0", "amdgpu", "0x1002", "0x744c", tt.files)
+			snap, err := readGPU(root, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := snap.GPUs[0]
+			if g.VRAMValid != tt.wantValid || g.VRAM != tt.want {
+				t.Fatalf("VRAM = %#v valid=%v, want %#v valid=%v", g.VRAM, g.VRAMValid, tt.want, tt.wantValid)
+			}
+		})
+	}
+}
+
 func TestGPUFillsNvidiaFromSMI(t *testing.T) {
 	root := t.TempDir()
 	writeNvidiaCard(t, root, "card0", "0000:01:00.0", "0x10de", "0x2684")

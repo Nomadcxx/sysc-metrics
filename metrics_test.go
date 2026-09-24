@@ -42,6 +42,9 @@ func TestIssueWrapsSourceAndCause(t *testing.T) {
 }
 
 func TestPublicValueTypesHaveInvalidDerivedZeroValues(t *testing.T) {
+	if (GPU{}).VRAMValid {
+		t.Fatal("zero GPU reports valid VRAM")
+	}
 	var cpu CPUUsage
 	var core CPUCore
 	var snapshot CPUSnapshot

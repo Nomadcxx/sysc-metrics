@@ -285,6 +285,11 @@ type GPU struct {
 	Usage     GPUUsage
 	Celsius   float64
 	TempValid bool
+	// VRAM is dedicated device memory. VRAMValid is false when the driver
+	// does not report both used and total; an integrated part's shared
+	// system memory is never counted here.
+	VRAM      Capacity
+	VRAMValid bool
 }
 
 // GPUSnapshot lists GPUs collected at one time. GPUs and Issues are caller-owned.
