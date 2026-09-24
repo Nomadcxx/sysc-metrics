@@ -63,7 +63,9 @@ Battery is the sysfs power-supply aggregate. CPU temperature is one scored
 hwmon / thermal_zone reading. GPU usage and temperature come from drm sysfs,
 with AMD usage from `gpu_busy_percent`, NVIDIA falling back to `nvidia-smi`
 when a `10de:` device is present, and Intel i915 usage from PMU engine-busy
-counters through the stateful `GPUSampler`. Collectors use Linux interfaces
+counters through the stateful `GPUSampler`. GPU VRAM used and total come from
+`mem_info_vram_used` / `mem_info_vram_total` on `amdgpu` and from the same `nvidia-smi` query on
+NVIDIA; Intel reports VRAM invalid. Collectors use Linux interfaces
 such as `/proc`, `/sys`, `statfs`, and `os/exec` for that optional NVIDIA
 binary.
 
