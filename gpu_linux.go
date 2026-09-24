@@ -235,6 +235,10 @@ func applyNvidiaCSV(found []gpuFound, out []byte) {
 			if !found[i].gpu.TempValid && row.hasTemp {
 				found[i].gpu.Celsius, found[i].gpu.TempValid = row.temp, true
 			}
+			if !found[i].gpu.VRAMValid && row.hasVRAM && row.vramUsedMiB >= 0 && row.vramTotalMiB >= 0 {
+				found[i].gpu.VRAM, found[i].gpu.VRAMValid = vramCapacity(
+					uint64(row.vramUsedMiB)<<20, uint64(row.vramTotalMiB)<<20)
+			}
 			if found[i].gpu.Name == "" && row.name != "" {
 				found[i].gpu.Name = row.name
 			}
@@ -249,10 +253,11 @@ func parseNvidiaCSV(out []byte) []nvidiaRow {
 		if len(line) == 0 {
 			continue
 		}
-		parts := strings.Split(string(line), ",")
-		if len(parts) < 3 {
+		raw := strings.Split(string(line), ",")
+		if len(raw) < 3 {
 			continue
 		}
+		parts := append([]string(nil), raw...)
 		for i := range parts {
 			parts[i] = strings.TrimSpace(parts[i])
 		}
@@ -263,8 +268,16 @@ func parseNvidiaCSV(out []byte) []nvidiaRow {
 		if c, err := strconv.ParseFloat(parts[2], 64); err == nil {
 			row.temp, row.hasTemp = c, true
 		}
-		if len(parts) > 3 {
-			row.name = strings.TrimSpace(strings.Join(parts[3:], ","))
+		// Memory sits before the name because the name is re-joined on
+		// commas. A row too short to carry memory fills no name either, so
+		// a number is never read as a name or a name as a number.
+		if len(parts) >= 6 {
+			used, errU := strconv.ParseFloat(parts[3], 64)
+			total, errT := strconv.ParseFloat(parts[4], 64)
+			if errU == nil && errT == nil {
+				row.vramUsedMiB, row.vramTotalMiB, row.hasVRAM = used, total, true
+			}
+			row.name = strings.TrimSpace(strings.Join(raw[5:], ","))
 		}
 		rows = append(rows, row)
 	}
@@ -277,21 +290,43 @@ type nvidiaRow struct {
 	hasUtil bool
 	temp    float64
 	hasTemp bool
-	name    string
+	// VRAM arrives in MiB from --format=csv,nounits.
+	vramUsedMiB  float64
+	vramTotalMiB float64
+	hasVRAM      bool
+	name         string
 }
 
+// matchBDF compares PCI addresses written with different domain widths:
+// sysfs prints four hex digits (0000:08:00.0), nvidia-smi prints eight
+// (00000000:08:00.0), and a bare bus:device.function means domain zero.
 func matchBDF(sysfsBDF, smiBDF string) bool {
-	sysfsBDF = strings.ToLower(sysfsBDF)
-	smiBDF = strings.ToLower(smiBDF)
-	strip := func(s string) string { return strings.TrimPrefix(s, "0000:") }
-	return sysfsBDF == smiBDF || strip(sysfsBDF) == strip(smiBDF)
+	d1, rest1, ok1 := splitBDF(sysfsBDF)
+	d2, rest2, ok2 := splitBDF(smiBDF)
+	return ok1 && ok2 && d1 == d2 && rest1 == rest2
+}
+
+func splitBDF(s string) (domain uint64, rest string, ok bool) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if strings.Count(s, ":") == 1 {
+		return 0, s, s != ""
+	}
+	head, tail, found := strings.Cut(s, ":")
+	if !found {
+		return 0, "", false
+	}
+	d, err := strconv.ParseUint(head, 16, 32)
+	if err != nil {
+		return 0, "", false
+	}
+	return d, tail, true
 }
 
 func runNvidiaSMI() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nvidia-smi",
-		"--query-gpu=pci.bus_id,utilization.gpu,temperature.gpu,name",
+		"--query-gpu=pci.bus_id,utilization.gpu,temperature.gpu,memory.used,memory.total,name",
 		"--format=csv,noheader,nounits")
 	return cmd.Output()
 }

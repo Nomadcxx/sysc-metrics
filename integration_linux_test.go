@@ -99,6 +99,10 @@ func TestLinuxIntegration(t *testing.T) {
 		if g.TempValid && (g.Celsius <= 0 || g.Celsius >= 150) {
 			t.Fatalf("GPU temperature out of range: %#v", g)
 		}
+		if g.VRAMValid && (g.VRAM.TotalBytes == 0 || g.VRAM.UsedBytes > g.VRAM.TotalBytes) {
+			t.Fatalf("GPU VRAM out of range: %#v", g)
+		}
+		t.Logf("GPU %s %s VRAM valid=%v used=%d total=%d", g.PCIID, g.Name, g.VRAMValid, g.VRAM.UsedBytes>>20, g.VRAM.TotalBytes>>20)
 	}
 
 	gpuSampler := NewGPUSampler()

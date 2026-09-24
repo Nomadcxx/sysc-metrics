@@ -118,7 +118,7 @@ func TestGPUFillsNvidiaFromSMI(t *testing.T) {
 	called := false
 	smi := func() ([]byte, error) {
 		called = true
-		return []byte("0000:01:00.0, 37, 61, GeForce RTX 4090\n"), nil
+		return []byte("0000:01:00.0, 37, 61, 463, 8188, GeForce RTX 4090\n"), nil
 	}
 	snap, err := readGPU(root, nil, smi)
 	if err != nil {
@@ -139,6 +139,42 @@ func TestGPUFillsNvidiaFromSMI(t *testing.T) {
 	}
 	if g.Name != "GeForce RTX 4090" {
 		t.Fatalf("name = %q", g.Name)
+	}
+	wantVRAM := Capacity{TotalBytes: 8188 << 20, UsedBytes: 463 << 20, AvailableBytes: (8188 - 463) << 20}
+	if !g.VRAMValid || g.VRAM != wantVRAM {
+		t.Fatalf("VRAM = %#v valid=%v", g.VRAM, g.VRAMValid)
+	}
+}
+
+func TestParseNvidiaCSVColumns(t *testing.T) {
+	tests := []struct {
+		name     string
+		line     string
+		wantVRAM bool
+		used     float64
+		total    float64
+		wantName string
+		wantUtil bool
+	}{
+		{"full row", "0000:08:00.0, 0, 56, 463, 8188, NVIDIA GeForce RTX 4060", true, 463, 8188, "NVIDIA GeForce RTX 4060", true},
+		{"memory not available", "0000:08:00.0, 12, 50, [N/A], [N/A], GRID A100-4C", false, 0, 0, "GRID A100-4C", true},
+		{"comma in name", "0000:08:00.0, 1, 40, 10, 20, Quadro, Special Edition", true, 10, 20, "Quadro, Special Edition", true},
+		{"old four-column row", "0000:08:00.0, 37, 61, GeForce RTX 4090", false, 0, 0, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows := parseNvidiaCSV([]byte(tt.line + "\n"))
+			if len(rows) != 1 {
+				t.Fatalf("rows = %#v", rows)
+			}
+			r := rows[0]
+			if r.hasVRAM != tt.wantVRAM || r.vramUsedMiB != tt.used || r.vramTotalMiB != tt.total {
+				t.Fatalf("vram = %v %v/%v, want %v %v/%v", r.hasVRAM, r.vramUsedMiB, r.vramTotalMiB, tt.wantVRAM, tt.used, tt.total)
+			}
+			if r.name != tt.wantName || r.hasUtil != tt.wantUtil {
+				t.Fatalf("name=%q util=%v, want %q %v", r.name, r.hasUtil, tt.wantName, tt.wantUtil)
+			}
+		})
 	}
 }
 
@@ -167,8 +203,8 @@ func TestGPUMissingSMILeavesNvidiaInvalid(t *testing.T) {
 		t.Fatalf("GPUs = %#v", snap.GPUs)
 	}
 	g := snap.GPUs[0]
-	if g.Usage.Valid || g.TempValid {
-		t.Fatalf("missing smi still set rates: %#v", g)
+	if g.Usage.Valid || g.TempValid || g.VRAMValid {
+		t.Fatalf("missing smi still set readings: %#v", g)
 	}
 }
 
@@ -682,5 +718,41 @@ func TestReadGPUKeepsIntelUsageInvalid(t *testing.T) {
 	}
 	if len(snapshot.GPUs) != 1 || snapshot.GPUs[0].Usage.Valid {
 		t.Fatalf("ReadGPU Intel usage = %#v", snapshot.GPUs)
+	}
+}
+
+// nvidia-smi prints an eight-digit PCI domain; sysfs prints four. The two
+// name the same device, and a mismatch silently drops every NVIDIA reading.
+func TestMatchBDFAcrossDomainWidths(t *testing.T) {
+	for _, tc := range []struct {
+		sysfs, smi string
+		want       bool
+	}{
+		{"0000:08:00.0", "00000000:08:00.0", true},
+		{"0000:08:00.0", "0000:08:00.0", true},
+		{"0000:08:00.0", "08:00.0", true},
+		{"0000:0A:00.0", "00000000:0a:00.0", true},
+		{"0001:08:00.0", "00000000:08:00.0", false},
+		{"0000:08:00.0", "00000000:09:00.0", false},
+		{"0000:08:00.0", "00000000:08:00.1", false},
+	} {
+		if got := matchBDF(tc.sysfs, tc.smi); got != tc.want {
+			t.Errorf("matchBDF(%q, %q) = %v, want %v", tc.sysfs, tc.smi, got, tc.want)
+		}
+	}
+}
+
+func TestGPUFillsNvidiaWithEightDigitDomain(t *testing.T) {
+	root := t.TempDir()
+	writeNvidiaCard(t, root, "card1", "0000:08:00.0", "0x10de", "0x2808")
+	snap, err := readGPU(root, nil, func() ([]byte, error) {
+		return []byte("00000000:08:00.0, 12, 56, 444, 8188, NVIDIA GeForce RTX 4060\n"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := snap.GPUs[0]
+	if !g.Usage.Valid || !g.TempValid || !g.VRAMValid {
+		t.Fatalf("eight-digit domain dropped the nvidia-smi row: %#v", g)
 	}
 }
