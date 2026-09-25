@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -151,8 +152,8 @@ func TestParseNvidiaCSVColumns(t *testing.T) {
 		name     string
 		line     string
 		wantVRAM bool
-		used     float64
-		total    float64
+		used     uint64
+		total    uint64
 		wantName string
 		wantUtil bool
 	}{
@@ -178,6 +179,29 @@ func TestParseNvidiaCSVColumns(t *testing.T) {
 	}
 }
 
+func TestParseNvidiaCSVRejectsNonIntegerVRAM(t *testing.T) {
+	for _, tc := range []struct {
+		name, used, total string
+	}{
+		{"infinite used", "inf", "8188"},
+		{"exponential used", "1e30", "8188"},
+		{"negative used", "-1", "8188"},
+		{"unavailable used", "[N/A]", "8188"},
+		{"infinite total", "1", "inf"},
+		{"exponential total", "1", "1e30"},
+		{"negative total", "1", "-1"},
+		{"unavailable total", "1", "[N/A]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := fmt.Sprintf("0000:08:00.0, 12, 56, %s, %s, NVIDIA GPU", tc.used, tc.total)
+			rows := parseNvidiaCSV([]byte(line))
+			if len(rows) != 1 || rows[0].hasVRAM {
+				t.Fatalf("row = %#v, want invalid VRAM", rows)
+			}
+		})
+	}
+}
+
 func TestGPUDoesNotInvokeSMIWithoutNvidia(t *testing.T) {
 	root := t.TempDir()
 	writeDRMCard(t, root, "card0", "i915", "0x8086", "0x5917", nil)
@@ -193,8 +217,14 @@ func TestGPUDoesNotInvokeSMIWithoutNvidia(t *testing.T) {
 func TestGPUMissingSMILeavesNvidiaInvalid(t *testing.T) {
 	root := t.TempDir()
 	writeNvidiaCard(t, root, "card0", "0000:01:00.0", "0x10de", "0x2684")
+	cmd := exec.Command("sh", "-c", "exit 9")
+	exitErr := cmd.Run()
+	var processErr *exec.ExitError
+	if !errors.As(exitErr, &processErr) || processErr.ExitCode() != 9 {
+		t.Fatalf("simulated nvidia-smi error = %v, want exit status 9", exitErr)
+	}
 	snap, err := readGPU(root, nil, func() ([]byte, error) {
-		return nil, os.ErrNotExist
+		return nil, exitErr
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +235,27 @@ func TestGPUMissingSMILeavesNvidiaInvalid(t *testing.T) {
 	g := snap.GPUs[0]
 	if g.Usage.Valid || g.TempValid || g.VRAMValid {
 		t.Fatalf("missing smi still set readings: %#v", g)
+	}
+	if len(snap.Issues) != 1 || snap.Issues[0].Source != "nvidia-smi" {
+		t.Fatalf("Issues = %#v, want one nvidia-smi issue", snap.Issues)
+	}
+}
+
+func TestGPUKeepsUsageAndTemperatureWhenVRAMIsUnavailable(t *testing.T) {
+	root := t.TempDir()
+	writeNvidiaCard(t, root, "card0", "0000:01:00.0", "0x10de", "0x2684")
+	snap, err := readGPU(root, nil, func() ([]byte, error) {
+		return []byte("00000000:01:00.0, 12, 56, [N/A], [N/A], NVIDIA GPU\n"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.GPUs) != 1 {
+		t.Fatalf("GPUs = %#v", snap.GPUs)
+	}
+	g := snap.GPUs[0]
+	if !g.Usage.Valid || g.Usage.Fraction != 0.12 || !g.TempValid || g.Celsius != 56 || g.VRAMValid {
+		t.Fatalf("GPU with unavailable VRAM = %#v, want usage/temp valid and VRAM invalid", g)
 	}
 }
 
@@ -728,7 +779,12 @@ func TestMatchBDFAcrossDomainWidths(t *testing.T) {
 		sysfs, smi string
 		want       bool
 	}{
+		{"", "", false},
+		{"device", "device", false},
 		{"0000:08:00.0", "00000000:08:00.0", true},
+		{" 0000:08:00.0", "00000000:08:00.0\t", true},
+		{"10000:e1:00.0", "00010000:e1:00.0", true},
+		{"0000:08:00.0", "zzzz:08:00.0", false},
 		{"0000:08:00.0", "0000:08:00.0", true},
 		{"0000:08:00.0", "08:00.0", true},
 		{"0000:0A:00.0", "00000000:0a:00.0", true},

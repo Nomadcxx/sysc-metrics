@@ -235,9 +235,9 @@ func applyNvidiaCSV(found []gpuFound, out []byte) {
 			if !found[i].gpu.TempValid && row.hasTemp {
 				found[i].gpu.Celsius, found[i].gpu.TempValid = row.temp, true
 			}
-			if !found[i].gpu.VRAMValid && row.hasVRAM && row.vramUsedMiB >= 0 && row.vramTotalMiB >= 0 {
+			if !found[i].gpu.VRAMValid && row.hasVRAM {
 				found[i].gpu.VRAM, found[i].gpu.VRAMValid = vramCapacity(
-					uint64(row.vramUsedMiB)<<20, uint64(row.vramTotalMiB)<<20)
+					row.vramUsedMiB<<20, row.vramTotalMiB<<20)
 			}
 			if found[i].gpu.Name == "" && row.name != "" {
 				found[i].gpu.Name = row.name
@@ -272,8 +272,8 @@ func parseNvidiaCSV(out []byte) []nvidiaRow {
 		// commas. A row too short to carry memory fills no name either, so
 		// a number is never read as a name or a name as a number.
 		if len(parts) >= 6 {
-			used, errU := strconv.ParseFloat(parts[3], 64)
-			total, errT := strconv.ParseFloat(parts[4], 64)
+			used, errU := strconv.ParseUint(parts[3], 10, 44)
+			total, errT := strconv.ParseUint(parts[4], 10, 44)
 			if errU == nil && errT == nil {
 				row.vramUsedMiB, row.vramTotalMiB, row.hasVRAM = used, total, true
 			}
@@ -291,8 +291,8 @@ type nvidiaRow struct {
 	temp    float64
 	hasTemp bool
 	// VRAM arrives in MiB from --format=csv,nounits.
-	vramUsedMiB  float64
-	vramTotalMiB float64
+	vramUsedMiB  uint64
+	vramTotalMiB uint64
 	hasVRAM      bool
 	name         string
 }
