@@ -203,9 +203,19 @@ func TestIntelGPULive(t *testing.T) {
 		t.Logf("second sample: PCIID=%s fraction=%v valid=%v",
 			g.PCIID, g.Usage.Fraction, g.Usage.Valid)
 		if !g.Usage.Valid {
-			t.Fatalf("second sample usage is invalid (issues: %v); opening i915 counters requires CAP_PERFMON or CAP_SYS_ADMIN — on measured kernels lowering kernel.perf_event_paranoid does not grant unprivileged system-wide counters", second.Issues)
+			t.Fatalf("second sample usage is invalid (issues: %v); the i915 PMU needs CAP_PERFMON or CAP_SYS_ADMIN, and the unprivileged fdinfo fallback needs a DRM client of this user on the GPU in two consecutive samples", second.Issues)
 		}
 		assertFraction(t, "Intel GPU usage", g.Usage.Fraction)
+		// Name the source, so a pass does not read as proof the PMU works.
+		source := "DRM fdinfo (PMU unavailable)"
+		for _, state := range sampler.engines {
+			for _, engine := range state.engines {
+				if engine.counter != nil {
+					source = "i915 PMU"
+				}
+			}
+		}
+		t.Logf("usage source: %s", source)
 	}
 	if len(second.Issues) > 0 {
 		t.Logf("issues: %v", second.Issues)

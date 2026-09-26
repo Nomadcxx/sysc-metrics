@@ -304,11 +304,16 @@ func ReadGPU() (GPUSnapshot, error) {
 	return readGPU(drmRoot, pciIDsPaths, nvidiaSMI)
 }
 
-// GPUSampler retains Intel i915 PMU engine counters for sequential rate
-// sampling. It is owned by one sequential polling caller, starts no
-// goroutines, and owns open PMU counters until Close. ReadGPU cannot report
-// Intel usage; a consumer that needs it must sample here and close the
-// sampler when its polling stops.
+// GPUSampler retains Intel i915 PMU engine counters and DRM client fdinfo
+// baselines for sequential rate sampling. It is owned by one sequential
+// polling caller, starts no goroutines, and owns open PMU counters until
+// Close. ReadGPU cannot report Intel usage; a consumer that needs it must
+// sample here and close the sampler when its polling stops.
+//
+// Without the privilege the PMU needs, usage for a GPU still lacking it comes
+// from walking /proc for this user's /dev/dri descriptors: one readlink per
+// descriptor each sample, and only while some GPU lacks usage. Other users'
+// clients are invisible to that walk, so usage can stay invalid.
 type GPUSampler struct {
 	drmRoot     string
 	pmuRoot     string
@@ -325,11 +330,15 @@ type GPUSampler struct {
 	fdPrev    drmClients
 	fdPrevAt  time.Time
 	fdHasPrev bool
+	fdEmpty   int // consecutive walks with no engine data for a GPU missing usage
+	fdIdle    int // samples skipped since the walk gave up
+	fdWalks   int // walks made, for tests and diagnostics
 }
 
 // NewGPUSampler returns a GPU sampler owned by one sequential polling caller.
 // It reports the same snapshot as ReadGPU and additionally fills Intel i915
-// usage from the second sample on.
+// usage, and usage for any GPU the other paths leave empty, from the second
+// sample on (PMU counters, else DRM client fdinfo).
 func NewGPUSampler() *GPUSampler {
 	return newGPUSampler(drmRoot, pmuDevicesRoot, pciIDsPaths, nvidiaSMI)
 }

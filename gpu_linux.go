@@ -379,7 +379,7 @@ func (s *GPUSampler) Close() error {
 	}
 	s.engines = make(map[string]*gpuPMUState)
 	s.hasPrevious = false
-	s.fdPrev, s.fdHasPrev = nil, false
+	s.fdPrev, s.fdHasPrev, s.fdEmpty, s.fdIdle = nil, false, 0, 0
 	return closeErr
 }
 

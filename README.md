@@ -39,8 +39,8 @@ individual sources or entities.
 from the second sample on, derived from PMU engine-busy counters opened with `perf_event_open`.
 On measured kernels, opening those system-wide counters requires `CAP_PERFMON` (or
 `CAP_SYS_ADMIN`) on the process; lowering `kernel.perf_event_paranoid` did not lift the gate.
-Without privilege the sampler records an `Issue` and fills Intel usage from DRM client fdinfo
-instead (see Scope), while identity and temperature stay filled. `ReadGPU` never reports Intel usage. Close a `GPUSampler` when its
+Without privilege the sampler records an `Issue` and tries DRM client fdinfo instead (see Scope),
+while identity and temperature stay filled; the PMU `Issue` is dropped once fdinfo supplies usage. `ReadGPU` never reports Intel usage. Close a `GPUSampler` when its
 polling stops; it owns open counter descriptors.
 
 Polling cadence, caching, presentation, units shown to users, alerts, and filtering remain consumer
@@ -66,9 +66,14 @@ when a `10de:` device is present, and Intel i915 usage from PMU engine-busy
 counters through the stateful `GPUSampler`. GPU VRAM used and total come from
 `mem_info_vram_used` / `mem_info_vram_total` on `amdgpu` and from the same `nvidia-smi` query on
 NVIDIA; Intel reports VRAM invalid. When a GPU still has no usage (the i915 PMU needs
-`CAP_PERFMON`, which a desktop process does not hold), `GPUSampler` falls back to DRM client fdinfo:
-the busiest engine's time across this user's `/proc/*/fdinfo` clients for that PCI device, from the
-second sample on. Other users' processes are not visible to it. Collectors use Linux interfaces
+`CAP_PERFMON`, which a desktop process does not hold), `GPUSampler` falls back to DRM client fdinfo.
+It reads the `drm-engine-<class>` nanosecond counters that i915 and amdgpu publish, for descriptors
+under `/dev/dri` held by this user's processes, and reports the busiest engine class's share of its
+`drm-engine-capacity-<class>` over the interval, from the second sample on. Usage stays invalid,
+never zero, when no such client of that GPU is present in two consecutive samples: headless, or when
+only another user's processes (a greeter, a compositor under a different account) use the GPU. xe's
+`drm-cycles-*` counters are not read. After three walks that find no engine data for any GPU still
+missing usage, the sampler reports one `Issue` and retries every thirtieth sample. Collectors use Linux interfaces
 such as `/proc`, `/sys`, `statfs`, and `os/exec` for that optional NVIDIA
 binary.
 
