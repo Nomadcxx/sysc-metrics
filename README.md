@@ -65,7 +65,10 @@ with AMD usage from `gpu_busy_percent`, NVIDIA falling back to `nvidia-smi`
 when a `10de:` device is present, and Intel i915 usage from PMU engine-busy
 counters through the stateful `GPUSampler`. GPU VRAM used and total come from
 `mem_info_vram_used` / `mem_info_vram_total` on `amdgpu` and from the same `nvidia-smi` query on
-NVIDIA; Intel reports VRAM invalid. Collectors use Linux interfaces
+NVIDIA; Intel reports VRAM invalid. When a GPU still has no usage (the i915 PMU needs
+`CAP_PERFMON`, which a desktop process does not hold), `GPUSampler` falls back to DRM client fdinfo:
+the busiest engine's time across this user's `/proc/*/fdinfo` clients for that PCI device, from the
+second sample on. Other users' processes are not visible to it. Collectors use Linux interfaces
 such as `/proc`, `/sys`, `statfs`, and `os/exec` for that optional NVIDIA
 binary.
 

@@ -319,6 +319,12 @@ type GPUSampler struct {
 	engines     map[string]*gpuPMUState
 	hasPrevious bool
 	previousAt  time.Time
+	// DRM client fdinfo: the unprivileged usage path for GPUs whose
+	// driver and PMU give no busy figure.
+	procRoot  string
+	fdPrev    drmClients
+	fdPrevAt  time.Time
+	fdHasPrev bool
 }
 
 // NewGPUSampler returns a GPU sampler owned by one sequential polling caller.

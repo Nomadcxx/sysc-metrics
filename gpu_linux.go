@@ -345,13 +345,14 @@ type gpuPMUState struct {
 
 func newGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]byte, error)) *GPUSampler {
 	return &GPUSampler{
-		drmRoot: drmRoot,
-		pmuRoot: pmuRoot,
-		pciIDs:  pciIDs,
-		smi:     smi,
-		now:     time.Now,
-		open:    openGPUCounter,
-		engines: make(map[string]*gpuPMUState),
+		drmRoot:  drmRoot,
+		pmuRoot:  pmuRoot,
+		pciIDs:   pciIDs,
+		smi:      smi,
+		now:      time.Now,
+		open:     openGPUCounter,
+		engines:  make(map[string]*gpuPMUState),
+		procRoot: procRoot,
 	}
 }
 
@@ -363,6 +364,7 @@ func (s *GPUSampler) Sample() (GPUSnapshot, error) {
 		return GPUSnapshot{}, err
 	}
 	s.applyIntelPMU(now, found, &snapshot)
+	s.applyFDInfo(now, found, &snapshot)
 	return snapshot, nil
 }
 
@@ -377,6 +379,7 @@ func (s *GPUSampler) Close() error {
 	}
 	s.engines = make(map[string]*gpuPMUState)
 	s.hasPrevious = false
+	s.fdPrev, s.fdHasPrev = nil, false
 	return closeErr
 }
 

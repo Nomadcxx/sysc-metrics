@@ -415,6 +415,8 @@ func newTestGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]b
 	sampler := newGPUSampler(drmRoot, pmuRoot, pciIDs, smi)
 	sampler.open = opener.open
 	sampler.now = scriptedClock(times)
+	// Hermetic: no fdinfo unless a test writes some under its own root.
+	sampler.procRoot = filepath.Join(drmRoot, "no-proc")
 	return sampler
 }
 
