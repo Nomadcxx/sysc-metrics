@@ -1,96 +1,139 @@
 # sysc-metrics
 
-`sysc-metrics` is a small Go library for read-only Linux system telemetry. It supplies the built-in
-monitoring widgets in [`sysc-shell`](https://github.com/Nomadcxx/sysc-shell) without importing a CLI,
-TUI, HTTP server, or unrelated application framework.
+Read-only Linux system telemetry for Go. CPU, memory, disks, network, temperature, battery, GPU and
+processes, read straight from `/proc` and `/sys` with nothing but the standard library. It feeds the
+bar widgets and system monitor in [sysc-shell](https://github.com/Nomadcxx/sysc-shell).
 
-The M0 contract, M1 core collectors, sysfs battery, CPU temperature, GPU
-usage/temperature, and opt-in process sampling are implemented.
+## Features
+
+- **CPU**: total and per-core usage, per-core frequency, and load averages
+- **Memory**: RAM and swap
+- **Disks**: capacity for every mounted filesystem, plus read/write rates and busy time per block device
+- **Network**: byte and packet rates per interface, with error and drop counters
+- **Temperature**: one CPU package reading, from k10temp, coretemp or a thermal zone, whichever the
+  machine has
+- **Battery**: charge, state, power draw and time remaining, combined across every battery and UPS
+- **GPU**: usage, temperature, name and VRAM for AMD, NVIDIA and Intel
+- **Processes**: CPU and memory per process, with identities that don't get confused by PID reuse
+- **Uptime**
+- **Small**: Linux only, standard library only, and it never starts a goroutine
+
+## Installation
+
+**Requires:** Go 1.26+ on Linux.
+
+```bash
+go get github.com/Nomadcxx/sysc-metrics
+```
 
 ## Usage
 
+Values that don't depend on time come from a single read:
+
 ```go
-package main
+mem, err := metrics.ReadMemory()
+if err != nil {
+	return err
+}
+fmt.Printf("memory: %d of %d bytes used\n", mem.Memory.UsedBytes, mem.Memory.TotalBytes)
+```
 
-import (
-	"fmt"
-	"github.com/Nomadcxx/sysc-metrics"
-)
+`ReadMemory`, `ReadFilesystems`, `ReadThermal`, `ReadBattery`, `ReadUptime` and `ReadGPU` all work
+this way.
 
-func main() {
-	sampler := metrics.NewGPUSampler()
-	snapshot, err := sampler.Sample()
+Rates need two readings, so CPU, disk, network, process and GPU usage come from a sampler. Call
+`Sample` on your own ticker. The first sample only sets a baseline, and its rates come back with
+`Valid == false`:
+
+```go
+cpu := metrics.NewCPUSampler()
+gpu := metrics.NewGPUSampler()
+defer gpu.Close()
+
+for range time.Tick(time.Second) {
+	c, err := cpu.Sample()
 	if err != nil {
-		panic(err)
+		return err
 	}
-	if snapshot.Usage.Valid {
-		fmt.Println(snapshot.Usage.Fraction)
+	if c.Usage.Valid {
+		fmt.Printf("cpu: %.0f%%\n", c.Usage.Fraction*100)
 	}
-	sampler.Close()
+
+	g, _ := gpu.Sample()
+	for _, card := range g.GPUs {
+		if card.Usage.Valid {
+			fmt.Printf("%s: %.0f%%\n", card.Name, card.Usage.Fraction*100)
+		}
+	}
 }
 ```
 
-M1 is Linux-only and uses only the Go standard library. Samplers belong to one sequential polling
-owner; they do not start goroutines. First and discontinuous rate samples have `Valid == false`, while
-valid zero values remain valid. A snapshot may contain partial data and `Issue` values for failed
-individual sources or entities.
+On a desktop with an RTX 4060 that prints:
 
-`GPUSampler` reports the same GPU snapshot as `ReadGPU` and additionally fills Intel i915 usage
-from the second sample on, derived from PMU engine-busy counters opened with `perf_event_open`.
-On measured kernels, opening those system-wide counters requires `CAP_PERFMON` (or
-`CAP_SYS_ADMIN`) on the process; lowering `kernel.perf_event_paranoid` did not lift the gate.
-Without privilege the sampler records an `Issue` and tries DRM client fdinfo instead (see Scope),
-while identity and temperature stay filled; the PMU `Issue` is dropped once fdinfo supplies usage. `ReadGPU` never reports Intel usage. Close a `GPUSampler` when its
-polling stops; it owns open counter descriptors.
+```text
+memory: 18722406400 of 33559834624 bytes used
+AD106 [GeForce RTX 4060]: 6%
+cpu: 14%
+AD106 [GeForce RTX 4060]: 5%
+cpu: 12%
+```
 
-Polling cadence, caching, presentation, units shown to users, alerts, and filtering remain consumer
-responsibilities.
+A few rules hold everywhere:
 
-## Scope
+- **Check `Valid`.** It separates a real zero from "no reading". An idle GPU at 0% is valid; a GPU
+  nobody can measure is not.
+- **Snapshots can be partial.** One unreadable mount or sensor doesn't fail the whole read. It shows
+  up in the snapshot's `Issues`, and everything else is filled in.
+- **A missing battery or sensor is not an error.** `ReadBattery` reports `Present == false` on a
+  desktop, and `ReadThermal` reports `Valid == false` where there is no known sensor.
+- **One sampler, one caller.** Samplers keep the previous reading and aren't safe for concurrent use.
+  Give each polling loop its own. Close a `GPUSampler` when you stop polling, because it holds open
+  counters.
 
-The first releases will collect:
+How often to poll, what to cache, and how to show the numbers is up to you.
 
-- aggregate and per-core CPU usage, load, and frequency;
-- memory and swap;
-- mounted-filesystem capacity and block-device I/O rates;
-- per-interface network counters and rates;
-- thermal sensors and available GPU metrics;
-- battery and UPS state, energy, rate, and estimated time;
-- uptime and basic totals;
-- process CPU and memory only when a consumer requests it.
+## GPU usage
 
-Battery is the sysfs power-supply aggregate. CPU temperature is one scored
-hwmon / thermal_zone reading. GPU usage and temperature come from drm sysfs,
-with AMD usage from `gpu_busy_percent`, NVIDIA falling back to `nvidia-smi`
-when a `10de:` device is present, and Intel i915 usage from PMU engine-busy
-counters through the stateful `GPUSampler`. GPU VRAM used and total come from
-`mem_info_vram_used` / `mem_info_vram_total` on `amdgpu` and from the same `nvidia-smi` query on
-NVIDIA; Intel reports VRAM invalid. When a GPU still has no usage (the i915 PMU needs
-`CAP_PERFMON`, which a desktop process does not hold), `GPUSampler` falls back to DRM client fdinfo.
-It reads the `drm-engine-<class>` nanosecond counters that i915 and amdgpu publish, for descriptors
-under `/dev/dri` held by this user's processes, and reports the busiest engine class's share of its
-`drm-engine-capacity-<class>` over the interval, from the second sample on. Usage stays invalid,
-never zero, when no such client of that GPU is present in two consecutive samples: headless, or when
-only another user's processes (a greeter, a compositor under a different account) use the GPU. xe's
-`drm-cycles-*` counters are not read. After three walks that find no engine data for any GPU still
-missing usage, the sampler reports one `Issue` and retries every thirtieth sample. Collectors use Linux interfaces
-such as `/proc`, `/sys`, `statfs`, and `os/exec` for that optional NVIDIA
-binary.
+Each vendor exposes usage differently:
 
-The library will not provide power controls, recursive directory sizes, filesystem indexing, SMART,
-quotas, vendor administration, a daemon, or cross-platform abstractions.
+| GPU | Usage | VRAM |
+|---|---|---|
+| AMD | `gpu_busy_percent` in sysfs | `mem_info_vram_used` / `mem_info_vram_total` |
+| NVIDIA | `nvidia-smi`, run only when an NVIDIA card is present | same `nvidia-smi` query |
+| Intel | `GPUSampler` only, from the second sample on | not reported |
 
-## Development gates
+`ReadGPU` never reports Intel usage. `GPUSampler` gets it from the i915 PMU counters, which need
+`CAP_PERFMON` on the process. Without that, it falls back to the per-client DRM counters in
+`/proc/*/fdinfo`, which covers i915 and amdgpu. That fallback only sees your own processes, so if the
+only GPU clients belong to another user (a greeter, say), usage stays invalid rather than showing a
+false zero. The newer Intel `xe` driver isn't supported yet.
 
-1. Define snapshot and sampling semantics, including first-sample behavior and counter reset handling.
-2. Implement CPU, memory, filesystem, block-device, and network collectors with fixture tests.
-3. Add thermal and battery collection, including UPower loss and sysfs fallback tests.
-4. Add GPU and process collectors only for a confirmed shell consumer.
-5. Qualify suspend/resume, device removal, permission errors, and real hardware before `v0.1.0`.
+To grant `CAP_PERFMON` to a program that uses this library, see
+[Intel GPU usage in sysc-shell](https://github.com/Nomadcxx/sysc-shell/blob/main/docs/metrics-widgets.md#intel-i915-gpu-usage).
 
-Package directories will be added with their first tested behavior; the repository will not track empty
-scaffolding.
+## What it doesn't do
 
-## Licence
+No power controls, directory sizes, file indexing, SMART data, quotas, vendor tools beyond
+`nvidia-smi`, daemon, or other operating systems.
 
-`sysc-metrics` uses the [BSD 3-Clause License](LICENSE).
+## Development
+
+```bash
+go vet ./...
+go test -race -count=1 ./...
+```
+
+On a machine with an Intel i915 GPU, check the live PMU path with:
+
+```bash
+SYSC_METRICS_INTEL_GPU_LIVE=1 go test -run TestIntelGPULive .
+```
+
+## License
+
+BSD-3-Clause
+
+---
+
+<a href="https://github.com/Nomadcxx"><img src="https://raw.githubusercontent.com/Nomadcxx/Nomadcxx/main/assets/rama-mark.svg" height="22" alt="RAMA"></a> — terminal-native tooling for the linux desktop.
+[More projects →](https://github.com/Nomadcxx) · [Sponsor](https://github.com/sponsors/Nomadcxx) ❤️
