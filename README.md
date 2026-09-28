@@ -88,7 +88,6 @@ quotas, vendor administration, a daemon, or cross-platform abstractions.
 4. Add GPU and process collectors only for a confirmed shell consumer.
 5. Qualify suspend/resume, device removal, permission errors, and real hardware before `v0.1.0`.
 
-See the [design](docs/plans/2026-08-27-sysc-metrics-design.md) and [roadmap](docs/roadmap.md).
 Package directories will be added with their first tested behavior; the repository will not track empty
 scaffolding.
 
