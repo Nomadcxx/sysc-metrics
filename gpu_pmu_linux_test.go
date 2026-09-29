@@ -5,6 +5,7 @@ package metrics
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -409,5 +410,27 @@ func TestAuditF1OpenGPUCounterIsCloseOnExec(t *testing.T) {
 	}
 	if got&uintptr(syscall.FD_CLOEXEC) == 0 {
 		t.Fatal("F1: openGPUCounter returned a non-close-on-exec descriptor")
+	}
+}
+
+func TestDiscoverBusyEventsFailClosedWhenFormatUnreadable(t *testing.T) {
+	devices := t.TempDir()
+	root := writePMU(t, devices, "i915", "",
+		map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	// Present but unreadable: a directory in place of the format file, so
+	// no config mask can be derived. Events must NOT be admitted (issue #5).
+	target := filepath.Join(root, "format", "i915_eventid")
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	events, issues := discoverBusyEvents(root)
+	if len(events) != 0 {
+		t.Fatalf("events admitted with unreadable format mask: %#v", events)
+	}
+	if len(issues) != 1 || !strings.HasSuffix(issues[0].Source, filepath.Join(root, "format")) {
+		t.Fatalf("issues = %#v", issues)
 	}
 }

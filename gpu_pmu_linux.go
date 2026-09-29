@@ -143,6 +143,12 @@ func discoverBusyEvents(pmuRoot string) ([]pmuEvent, []Issue) {
 		return nil, []Issue{{Source: eventsRoot, Err: err}}
 	}
 	mask, maskErr := formatConfigMask(filepath.Join(pmuRoot, "format"))
+	if maskErr != nil {
+		// Without the format mask every config check would pass, which is
+		// how a corrupt or absent format/ could silently open events the
+		// PMU cannot program. Fail closed and say so (issue #5).
+		return nil, []Issue{{Source: filepath.Join(pmuRoot, "format"), Err: maskErr}}
+	}
 	var events []pmuEvent
 	var issues []Issue
 	for _, entry := range entries {
@@ -161,7 +167,7 @@ func discoverBusyEvents(pmuRoot string) ([]pmuEvent, []Issue) {
 			issues = append(issues, Issue{Source: path, Err: err})
 			continue
 		}
-		if maskErr == nil && config&^mask != 0 {
+		if config&^mask != 0 {
 			issues = append(issues, Issue{Source: path, Err: fmt.Errorf("config 0x%x outside format mask 0x%x", config, mask)})
 			continue
 		}
