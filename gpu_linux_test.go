@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -812,5 +813,112 @@ func TestGPUFillsNvidiaWithEightDigitDomain(t *testing.T) {
 	g := snap.GPUs[0]
 	if !g.Usage.Valid || !g.TempValid || !g.VRAMValid {
 		t.Fatalf("eight-digit domain dropped the nvidia-smi row: %#v", g)
+	}
+}
+
+func gpuHasIssue(issues []Issue, substr string) bool {
+	for _, is := range issues {
+		if strings.Contains(is.Source, substr) || (is.Err != nil && strings.Contains(is.Err.Error(), substr)) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGPUBusyOutOfRangeAndUnreadableAreNotValid(t *testing.T) {
+	root := t.TempDir()
+	dev := writeDRMCard(t, root, "card0", "amdgpu", "0x1002", "0x67df", map[string]string{
+		"gpu_busy_percent":         "150",
+		"hwmon/hwmon0/temp1_input": "45000",
+	})
+	snap, err := readGPU(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.GPUs[0].Usage.Valid {
+		t.Fatalf("busy 150 accepted: %#v", snap.GPUs[0].Usage)
+	}
+	if !gpuHasIssue(snap.Issues, "gpu_busy_percent") {
+		t.Fatalf("out-of-range busy not reported: %#v", snap.Issues)
+	}
+
+	// Present but unreadable (a directory in place of the file): reported,
+	// not silently treated as missing.
+	busy := filepath.Join(dev, "gpu_busy_percent")
+	if err := os.Remove(busy); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(busy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = readGPU(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.GPUs[0].Usage.Valid {
+		t.Fatalf("unreadable busy accepted: %#v", snap.GPUs[0].Usage)
+	}
+	if !gpuHasIssue(snap.Issues, "gpu_busy_percent") {
+		t.Fatalf("unreadable busy not reported: %#v", snap.Issues)
+	}
+}
+
+func TestGPUNvidiaCSVRejectsNonFiniteAndOutOfBand(t *testing.T) {
+	root := t.TempDir()
+	writeNvidiaCard(t, root, "card0", "0000:01:00.0", "0x10de", "0x2684")
+	smi := func() ([]byte, error) {
+		return []byte("0000:01:00.0, nan, 200, 463, 8188, GeForce RTX 4090\n"), nil
+	}
+	snap, err := readGPU(root, nil, smi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := snap.GPUs[0]
+	if g.Usage.Valid || g.TempValid {
+		t.Fatalf("non-finite/out-of-band util or temp accepted: %#v", g)
+	}
+}
+
+func TestGPUTemperatureBand(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		value     string
+		wantValid bool
+	}{
+		{"dead sensor zero", "0", false},
+		{"negative", "-5000", false},
+		{"implausible high", "150000", false},
+		{"live", "45000", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeDRMCard(t, root, "card0", "amdgpu", "0x1002", "0x67df", map[string]string{
+				"hwmon/hwmon0/temp1_input": tt.value,
+			})
+			snap, err := readGPU(root, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := snap.GPUs[0].TempValid; got != tt.wantValid {
+				t.Fatalf("temp1_input %s: TempValid = %v", tt.value, got)
+			}
+		})
+	}
+}
+
+func TestGPUSamplerCollectedAtUsesSamplerClock(t *testing.T) {
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	opener := &fakeOpener{counters: map[uint64]*fakeCounter{0x0: {values: []uint64{0}}}}
+	times := testTimes(1)
+	sampler := newTestGPUSampler(root, pmuRoot, nil, nil, opener, times)
+	snap, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.CollectedAt.Equal(times[0]) {
+		t.Fatalf("CollectedAt = %v, want scripted clock %v", snap.CollectedAt, times[0])
 	}
 }

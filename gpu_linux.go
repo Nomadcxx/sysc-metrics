@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,12 +36,11 @@ type gpuFound struct {
 }
 
 func readGPU(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUSnapshot, error) {
-	snapshot, _, err := readGPUs(drmRoot, pciIDs, smi)
+	snapshot, _, err := readGPUs(drmRoot, pciIDs, smi, time.Now())
 	return snapshot, err
 }
 
-func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUSnapshot, []gpuFound, error) {
-	now := time.Now()
+func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error), now time.Time) (GPUSnapshot, []gpuFound, error) {
 	entries, err := os.ReadDir(drmRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -88,15 +88,24 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUS
 		if strings.HasPrefix(pci, "10de:") {
 			hasNvidia = true
 		}
-		if busy, err := readSysfsInt(filepath.Join(dev, "gpu_busy_percent")); err == nil {
-			g.Usage = GPUUsage{Fraction: float64(busy) / 100, Valid: true}
+		busyPath := filepath.Join(dev, "gpu_busy_percent")
+		if busy, err := readSysfsInt(busyPath); err == nil {
+			if fraction, ok := busyFraction(float64(busy)); ok {
+				g.Usage = GPUUsage{Fraction: fraction, Valid: true}
+			} else {
+				issues = append(issues, Issue{Source: busyPath, Err: fmt.Errorf("gpu_busy_percent %d outside 0..100", busy)})
+			}
+		} else if !os.IsNotExist(err) {
+			// Present but unreadable (permissions, EISDIR, bad content) is
+			// reported, not silently treated as "no sensor" (issue #3).
+			issues = append(issues, Issue{Source: busyPath, Err: err})
 		}
 		if used, err := readSysfsUint(filepath.Join(dev, "mem_info_vram_used")); err == nil {
 			if total, err := readSysfsUint(filepath.Join(dev, "mem_info_vram_total")); err == nil {
 				g.VRAM, g.VRAMValid = vramCapacity(used, total)
 			}
 		}
-		if c, ok := readGPUHwmonTemp(dev); ok {
+		if c, ok := readGPUHwmonTemp(dev, &issues); ok {
 			g.Celsius, g.TempValid = c, true
 		}
 		found = append(found, gpuFound{card: name, bdf: gpuBDF(dev), gpu: g})
@@ -173,7 +182,16 @@ func formatPCIID(vendor, device string) string {
 	return strings.ToLower(strings.TrimPrefix(vendor, "0x")) + ":" + strings.ToLower(strings.TrimPrefix(device, "0x"))
 }
 
-func readGPUHwmonTemp(dev string) (float64, bool) {
+// busyFraction converts a 0..100 percent sensor value to a Valid fraction.
+// Non-finite or out-of-band values are never trustworthy (issue #3).
+func busyFraction(percent float64) (float64, bool) {
+	if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 || percent > 100 {
+		return 0, false
+	}
+	return percent / 100, true
+}
+
+func readGPUHwmonTemp(dev string, issues *[]Issue) (float64, bool) {
 	matches, err := filepath.Glob(filepath.Join(dev, "hwmon", "hwmon*", "temp1_input"))
 	if err != nil || len(matches) == 0 {
 		return 0, false
@@ -181,9 +199,19 @@ func readGPUHwmonTemp(dev string) (float64, bool) {
 	sort.Strings(matches)
 	milli, err := readSysfsInt(matches[0])
 	if err != nil {
+		if !os.IsNotExist(err) {
+			// Present but unreadable sensor: report, don't hide (issue #3).
+			*issues = append(*issues, Issue{Source: matches[0], Err: err})
+		}
 		return 0, false
 	}
-	return float64(milli) / 1000, true
+	celsius := float64(milli) / 1000
+	if !validCelsius(celsius) {
+		// Out-of-band values (0, negatives, NaN sentinels, >=150) leave
+		// TempValid false instead of advertising garbage (issue #12).
+		return 0, false
+	}
+	return celsius, true
 }
 
 func lookupPCIName(paths []string, vendor, device string) string {
@@ -230,7 +258,7 @@ func applyNvidiaCSV(found []gpuFound, out []byte) {
 				continue
 			}
 			if !found[i].gpu.Usage.Valid && row.hasUtil {
-				found[i].gpu.Usage = GPUUsage{Fraction: row.util / 100, Valid: true}
+				found[i].gpu.Usage = GPUUsage{Fraction: row.util, Valid: true}
 			}
 			if !found[i].gpu.TempValid && row.hasTemp {
 				found[i].gpu.Celsius, found[i].gpu.TempValid = row.temp, true
@@ -262,10 +290,14 @@ func parseNvidiaCSV(out []byte) []nvidiaRow {
 			parts[i] = strings.TrimSpace(parts[i])
 		}
 		row := nvidiaRow{bdf: parts[0]}
+		// nvidia-smi prints "nan"/"inf" for dead fields and ParseFloat
+		// happily accepts both; only in-band values fill the row (issue #3).
 		if u, err := strconv.ParseFloat(parts[1], 64); err == nil {
-			row.util, row.hasUtil = u, true
+			if f, ok := busyFraction(u); ok {
+				row.util, row.hasUtil = f, true
+			}
 		}
-		if c, err := strconv.ParseFloat(parts[2], 64); err == nil {
+		if c, err := strconv.ParseFloat(parts[2], 64); err == nil && validCelsius(c) {
 			row.temp, row.hasTemp = c, true
 		}
 		// Memory sits before the name because the name is re-joined on
@@ -359,7 +391,7 @@ func newGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]byte,
 // Sample returns one GPU snapshot. The sampler is not safe for concurrent use.
 func (s *GPUSampler) Sample() (GPUSnapshot, error) {
 	now := s.now()
-	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi)
+	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi, now)
 	if err != nil {
 		return GPUSnapshot{}, err
 	}
