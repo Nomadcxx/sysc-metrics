@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeFDInfo writes one /proc/<pid>/fdinfo/<fd> entry under procRoot.
@@ -220,5 +221,23 @@ func TestGPUSamplerKeepsPMUUsageOverFDInfo(t *testing.T) {
 func BenchmarkReadDRMClients(b *testing.B) {
 	for b.Loop() {
 		readDRMClients(procRoot)
+	}
+}
+
+func TestFDInfoBusySkipsNewEngineClassOnExistingClient(t *testing.T) {
+	before := map[string]drmClient{
+		"1": {busy: map[string]uint64{"render": 1_000_000_000}, capacity: map[string]uint64{"render": 1}},
+	}
+	// A "video" class first appears mid-stream carrying cumulative busy-ns;
+	// counting it as an interval delta would pin usage at 1.0 (issue #9).
+	after := map[string]drmClient{
+		"1": {
+			busy:     map[string]uint64{"render": 1_500_000_000, "video": 3_600_000_000_000},
+			capacity: map[string]uint64{"render": 1, "video": 1},
+		},
+	}
+	busy, ok := fdinfoBusy(before, after, time.Second)
+	if !ok || busy != 0.5 {
+		t.Fatalf("busy = %v ok = %v, want 0.5 from the steady render delta", busy, ok)
 	}
 }

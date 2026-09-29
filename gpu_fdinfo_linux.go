@@ -136,16 +136,25 @@ func fdinfoBusy(prev, cur map[string]drmClient, elapsed time.Duration) (float64,
 		}
 		backwards := false
 		for engine, ns := range client.busy {
-			if ns < before.busy[engine] {
+			if prevNS, had := before.busy[engine]; had && ns < prevNS {
 				backwards = true
 			}
 		}
 		if backwards {
 			continue
 		}
-		seen = true
 		for engine, ns := range client.busy {
-			sums[engine] += ns - before.busy[engine]
+			base, had := before.busy[engine]
+			if !had {
+				// A new engine class on an existing client carries its
+				// cumulative busy time from before we ever sampled it;
+				// counting that as this interval's delta reports a
+				// pinned 1.0. Rebase it and contribute nothing yet
+				// (issue #9, same spirit as a brand-new client).
+				continue
+			}
+			seen = true
+			sums[engine] += ns - base
 			capacity[engine] = max(capacity[engine], client.capacity[engine], 1)
 		}
 	}
