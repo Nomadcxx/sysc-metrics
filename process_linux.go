@@ -206,9 +206,16 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		process := Process{Identity: identity, Name: stat.name, ParentPID: stat.parentPID}
 		current[identity] = stat.cpuTicks
 		if previous, ok := s.previous[identity]; totalDeltaValid && ok && stat.cpuTicks >= previous {
-			process.CPU = CPUUsage{
-				Fraction: float64(stat.cpuTicks-previous) / float64(total-s.previousTotal),
-				Valid:    true,
+			delta := stat.cpuTicks - previous
+			// A process cannot burn more CPU than existed in the window. A
+			// delta above the total means /proc/stat was sampled before the
+			// walk (or a host rollover); report invalid rather than a
+			// >1 "fraction" (issue #7).
+			if delta <= total-s.previousTotal {
+				process.CPU = CPUUsage{
+					Fraction: float64(delta) / float64(total-s.previousTotal),
+					Valid:    true,
+				}
 			}
 		}
 

@@ -215,3 +215,28 @@ func writeProcess(t *testing.T, root string, pid int, name string, ppid int, cpu
 		}
 	}
 }
+
+func TestProcessSamplerInvalidatesImpossibleCPUDelta(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 100)
+	writeProcess(t, root, 42, "worker", 1, 10, 991, 1000, 40, []string{"worker"})
+
+	sampler := newProcessSampler(root)
+	if _, err := sampler.Sample(); err != nil {
+		t.Fatal(err)
+	}
+	// The system advanced 10 jiffies while the process claims 20 (stale or
+	// raced /proc/stat): Fraction would exceed 1, so it must be invalid.
+	writeProcStat(t, root, 110)
+	writeProcess(t, root, 42, "worker", 1, 30, 991, 1000, 40, []string{"worker"})
+	snap, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Processes) != 1 {
+		t.Fatalf("processes = %#v", snap.Processes)
+	}
+	if snap.Processes[0].CPU.Valid {
+		t.Fatalf("impossible fraction accepted: %#v", snap.Processes[0].CPU)
+	}
+}
