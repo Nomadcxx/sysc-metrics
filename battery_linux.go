@@ -5,6 +5,7 @@ package metrics
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,10 +21,16 @@ type supplyReading struct {
 	status    string
 	charge    float64
 	hasCharge bool
-	energyJ   float64
-	hasEnergy bool
-	watts     float64
-	hasWatts  bool
+	// chargeFromEnergy records that charge came from energy_now/energy_full
+	// rather than a capacity fallback; SOC is only aggregated across
+	// same-unit supplies (issue #6).
+	chargeFromEnergy bool
+	energyJ          float64
+	hasEnergy        bool
+	energyFullJ      float64
+	hasEnergyFull    bool
+	watts            float64
+	hasWatts         bool
 }
 
 func readBattery(root string) (BatterySnapshot, error) {
@@ -56,7 +63,7 @@ func readBattery(root string) (BatterySnapshot, error) {
 		return BatterySnapshot{CollectedAt: now, Issues: issues}, nil
 	}
 
-	snap := aggregateSupplies(now, supplies)
+	snap := aggregateSupplies(now, supplies, &issues)
 	snap.Issues = issues
 	return snap, nil
 }
@@ -71,14 +78,17 @@ func readSupply(dir string) (supplyReading, error) {
 		out.status = status
 	}
 
+	// energy_* is microWatt-hours. 1 µWh = 0.0036 J.
 	if energyNow, err := readSysfsUint(filepath.Join(dir, "energy_now")); err == nil {
-		if energyFull, err := readSysfsUint(filepath.Join(dir, "energy_full")); err == nil && energyFull > 0 {
-			out.charge = float64(energyNow) / float64(energyFull)
-			out.hasCharge = true
-		}
-		// energy_* is microWatt-hours. 1 µWh = 0.0036 J.
 		out.energyJ = float64(energyNow) * 0.0036
 		out.hasEnergy = true
+		if energyFull, err := readSysfsUint(filepath.Join(dir, "energy_full")); err == nil && energyFull > 0 {
+			out.energyFullJ = float64(energyFull) * 0.0036
+			out.hasEnergyFull = true
+			out.charge = float64(energyNow) / float64(energyFull)
+			out.chargeFromEnergy = true
+			out.hasCharge = true
+		}
 	} else if chargeNow, err := readSysfsUint(filepath.Join(dir, "charge_now")); err == nil {
 		if chargeFull, err := readSysfsUint(filepath.Join(dir, "charge_full")); err == nil && chargeFull > 0 {
 			out.charge = float64(chargeNow) / float64(chargeFull)
@@ -104,21 +114,26 @@ func readSupply(dir string) (supplyReading, error) {
 	return out, nil
 }
 
-func aggregateSupplies(now time.Time, supplies []supplyReading) BatterySnapshot {
+func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue) BatterySnapshot {
 	snap := BatterySnapshot{CollectedAt: now, Present: true}
-	var energy, energyCharged, watts float64
-	var nCharge, nWatts int
+	var (
+		energyNowSum   float64
+		energyFullSum  float64
+		capacityCharge float64
+		watts          float64
+	)
+	var nEnergy, nCapacity, nWatts int
 	var sawCharging, sawDischarging, sawFull, sawUnknown bool
 
 	for _, s := range supplies {
-		if s.hasCharge {
-			if s.hasEnergy {
-				energyCharged += s.charge * s.energyJ
-				energy += s.energyJ
-			} else {
-				snap.Charge += s.charge
-				nCharge++
-			}
+		switch {
+		case s.chargeFromEnergy:
+			energyNowSum += s.energyJ
+			energyFullSum += s.energyFullJ
+			nEnergy++
+		case s.hasCharge:
+			capacityCharge += s.charge
+			nCapacity++
 		}
 		if s.hasEnergy {
 			snap.EnergyJoules += s.energyJ
@@ -132,7 +147,10 @@ func aggregateSupplies(now time.Time, supplies []supplyReading) BatterySnapshot 
 			sawCharging = true
 		case "discharging":
 			sawDischarging = true
-		case "full":
+		case "full", "not charging", "idle":
+			// "Not charging"/"idle" is the steady AC state of a
+			// charge-threshold battery; it must not poison the Full
+			// aggregation the way an unknown word does (issue #6).
 			sawFull = true
 		default:
 			sawUnknown = true
@@ -150,11 +168,22 @@ func aggregateSupplies(now time.Time, supplies []supplyReading) BatterySnapshot 
 		snap.State = BatteryUnknown
 	}
 
-	if energy > 0 {
-		snap.Charge = energyCharged / energy
+	if nEnergy > 0 {
+		// Multi-pack SOC by capacity (Σ energy_now / Σ energy_full):
+		// weighting by energy_now alone let one nearly-empty pack drag
+		// the fleet percentage down (issue #10).
+		snap.Charge = energyNowSum / energyFullSum
 		snap.ChargeValid = true
-	} else if nCharge > 0 {
-		snap.Charge /= float64(nCharge)
+		if nCapacity > 0 {
+			// Mixed units are surfaced, never silently dropped (issue #6).
+			*issues = append(*issues, Issue{
+				Source: "power_supply",
+				Err: fmt.Errorf("mixed energy/capacity supplies: SOC aggregated %d energy-based supply(s), dropped %d capacity-only supply(s)",
+					nEnergy, nCapacity),
+			})
+		}
+	} else if nCapacity > 0 {
+		snap.Charge = capacityCharge / float64(nCapacity)
 		snap.ChargeValid = true
 	}
 	if snap.Charge < 0 {
@@ -169,8 +198,16 @@ func aggregateSupplies(now time.Time, supplies []supplyReading) BatterySnapshot 
 	}
 	if snap.State == BatteryDischarging && snap.RateValid && snap.RateWatts > 0 && snap.EnergyJoules > 0 {
 		hours := snap.EnergyJoules / (snap.RateWatts * 3600)
-		snap.TimeRemaining = time.Duration(hours * float64(time.Hour))
-		snap.TimeValid = true
+		// A pathological rate (e.g. power_now=1µW) overflows Duration and
+		// wraps negative with TimeValid true; implausible ETAs stay
+		// invalid (issue #11).
+		if !math.IsNaN(hours) && !math.IsInf(hours, 0) && hours > 0 &&
+			hours <= float64(math.MaxInt64)/float64(time.Hour) {
+			if remaining := time.Duration(hours * float64(time.Hour)); remaining > 0 {
+				snap.TimeRemaining = remaining
+				snap.TimeValid = true
+			}
+		}
 	}
 	return snap
 }
