@@ -17,6 +17,15 @@ const (
 	thermalZoneRoot = "/sys/class/thermal"
 )
 
+// validCelsius reports whether c is a trustworthy live die/package
+// temperature. The documented band is the open interval (0, 150): zero or
+// negative values come from dead or unpowered sensors, and NaN, infinities
+// and implausible highs fail the same comparisons. Shared by the thermal and
+// GPU paths so both agree on what "Valid" means (issues #8, #12).
+func validCelsius(c float64) bool {
+	return c > 0 && c < 150
+}
+
 func readThermal(hwmonRoot, thermalRoot string) (ThermalSnapshot, error) {
 	now := time.Now()
 	var issues []Issue
@@ -81,10 +90,16 @@ func pickKnownHwmon(root string, issues *[]Issue) (ThermalSnapshot, bool) {
 				*issues = append(*issues, Issue{Source: input, Err: err})
 				continue
 			}
+			celsius := float64(milli) / 1000
+			if !validCelsius(celsius) {
+				// A dead sensor reading 0 must not block a live candidate
+				// or the thermal_zone fallback below (issue #8).
+				continue
+			}
 			cand := thermalCandidate{
 				driverPri: driverPri,
 				sensorPri: hwmonSensorPriority(driver, label, index),
-				celsius:   float64(milli) / 1000,
+				celsius:   celsius,
 				source:    formatHwmonSource(driver, label),
 			}
 			if !bestOK || cand.driverPri < best.driverPri || (cand.driverPri == best.driverPri && cand.sensorPri < best.sensorPri) {
@@ -131,15 +146,15 @@ func pickThermalZone(root string, issues *[]Issue) (ThermalSnapshot, bool) {
 			continue
 		}
 		celsius := float64(milli) / 1000
+		if !validCelsius(celsius) {
+			continue
+		}
 		cand := thermalCandidate{driverPri: pri, celsius: celsius, source: kind}
 		if !bestOK || cand.driverPri < best.driverPri || (cand.driverPri == best.driverPri && celsius > best.celsius) {
 			best, bestOK = cand, true
 		}
 	}
 	if !bestOK {
-		return ThermalSnapshot{}, false
-	}
-	if best.celsius <= 0 {
 		return ThermalSnapshot{}, false
 	}
 	return ThermalSnapshot{Celsius: best.celsius, Valid: true, Source: best.source}, true

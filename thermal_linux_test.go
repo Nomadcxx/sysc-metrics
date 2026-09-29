@@ -95,3 +95,20 @@ func writeThermalZone(t *testing.T, root, dir, kind, milli string) {
 		t.Fatal(err)
 	}
 }
+
+func TestThermalIgnoresDeadHwmonAndFallsBackToZone(t *testing.T) {
+	hwmon := t.TempDir()
+	writeHwmon(t, hwmon, "hwmon0", "k10temp", map[string]string{
+		"temp1_input": "0",
+		"temp1_label": "Tctl",
+	})
+	thermal := t.TempDir()
+	writeThermalZone(t, thermal, "thermal_zone0", "x86_pkg_temp", "55000")
+	snap, err := readThermal(hwmon, thermal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Valid || snap.Celsius != 55 {
+		t.Fatalf("dead hwmon 0 blocked the thermal_zone fallback: %#v", snap)
+	}
+}
