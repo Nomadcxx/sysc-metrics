@@ -160,3 +160,20 @@ func TestReadBatteryImplausibleRateKeepsTimeInvalid(t *testing.T) {
 		t.Fatalf("overflowing ETA accepted: %v valid", snap.TimeRemaining)
 	}
 }
+
+func TestReadBatteryNegativeCurrentNowStillReportsRate(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"charge_now": "50000000", "charge_full": "100000000",
+		"current_now": "-2000000", "voltage_now": "11000000",
+	})
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// -2 A * 11 V = 22 W magnitude; unsigned parse lost the rate (issue #13).
+	if !snap.RateValid || math.Abs(snap.RateWatts-22) > 1e-9 {
+		t.Fatalf("rate = %v valid = %v, want 22 W", snap.RateWatts, snap.RateValid)
+	}
+}

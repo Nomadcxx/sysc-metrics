@@ -104,10 +104,12 @@ func readSupply(dir string) (supplyReading, error) {
 	if powerNow, err := readSysfsUint(filepath.Join(dir, "power_now")); err == nil {
 		out.watts = float64(powerNow) / 1e6
 		out.hasWatts = true
-	} else if currentNow, err := readSysfsUint(filepath.Join(dir, "current_now")); err == nil {
+	} else if currentNow, err := readSysfsInt(filepath.Join(dir, "current_now")); err == nil {
 		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil {
-			// µA * µV / 1e12 = W
-			out.watts = float64(currentNow) * float64(voltageNow) / 1e12
+			// µA * µV / 1e12 = W. current_now is signed (negative while
+			// discharging, per sysfs-class-power ABI); the rate is a
+			// magnitude either way (issue #13).
+			out.watts = math.Abs(float64(currentNow)) * float64(voltageNow) / 1e12
 			out.hasWatts = true
 		}
 	}
@@ -234,3 +236,6 @@ func readSysfsUint(path string) (uint64, error) {
 	}
 	return v, nil
 }
+
+// readSysfsInt (shared, thermal_linux.go) parses signed sysfs values such
+// as current_now.
