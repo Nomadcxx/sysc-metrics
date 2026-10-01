@@ -239,3 +239,25 @@ func TestReadBatteryOnlyDeviceScopeIsNotPresent(t *testing.T) {
 		t.Fatalf("Device-scope supply treated as system battery: %#v", snap)
 	}
 }
+
+func TestReadBatteryChargeSOCWhenEnergyFullUnusable(t *testing.T) {
+	root := t.TempDir()
+	// energy_now present but energy_full missing: charge_* must still
+	// give SOC; the old else-if chain fell through to no SOC at all
+	// (issue #17).
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now": "40000000",
+		"charge_now": "30000", "charge_full": "40000",
+	})
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.ChargeValid || math.Abs(snap.Charge-0.75) > 1e-9 {
+		t.Fatalf("charge = %v valid = %v, want 0.75 from charge ratio", snap.Charge, snap.ChargeValid)
+	}
+	if want := 40000000 * 0.0036; math.Abs(snap.EnergyJoules-want) > 1e-9 {
+		t.Fatalf("energy = %v, want %v kept from energy_now", snap.EnergyJoules, want)
+	}
+}

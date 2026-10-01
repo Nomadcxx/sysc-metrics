@@ -111,13 +111,20 @@ func readSupply(dir string) (supplyReading, error) {
 			out.chargeFromEnergy = true
 			out.hasCharge = true
 		}
-	} else if chargeNow, err := readSysfsUint(filepath.Join(dir, "charge_now")); err == nil {
-		if chargeFull, err := readSysfsUint(filepath.Join(dir, "charge_full")); err == nil && chargeFull > 0 {
-			out.charge = float64(chargeNow) / float64(chargeFull)
-			out.chargeAh = float64(chargeNow)
-			out.chargeFullAh = float64(chargeFull)
-			out.hasChargeFull = true
-			out.hasCharge = true
+	}
+	// charge_* is tried whenever the energy path did not establish SOC —
+	// an earlier else-if skipped it when energy_now existed but
+	// energy_full was missing/0, despite valid µAh counters (issue #17).
+	// Energy Joules from energy_now are kept regardless.
+	if !out.hasCharge {
+		if chargeNow, err := readSysfsUint(filepath.Join(dir, "charge_now")); err == nil {
+			if chargeFull, err := readSysfsUint(filepath.Join(dir, "charge_full")); err == nil && chargeFull > 0 {
+				out.charge = float64(chargeNow) / float64(chargeFull)
+				out.chargeAh = float64(chargeNow)
+				out.chargeFullAh = float64(chargeFull)
+				out.hasChargeFull = true
+				out.hasCharge = true
+			}
 		}
 	}
 	if !out.hasCharge {
