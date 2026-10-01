@@ -198,3 +198,44 @@ func TestReadBatterySOCWeightsByChargeFull(t *testing.T) {
 		t.Fatalf("charge = %v valid = %v, want %v", snap.Charge, snap.ChargeValid, want)
 	}
 }
+
+func TestReadBatteryExcludesDeviceScopeAndAbsent(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging", "scope": "System", "present": "1",
+		"energy_now": "50000000", "energy_full": "100000000",
+	})
+	writeSupply(t, root, "hid-mouse", map[string]string{
+		"type": "Battery", "status": "Discharging", "scope": "Device",
+		"capacity": "10",
+	})
+	writeSupply(t, root, "BAT1", map[string]string{
+		"type": "Battery", "status": "Full", "present": "0",
+		"capacity": "100",
+	})
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only BAT0 aggregates; mouse pack and empty bay stay out (issue #15).
+	if !snap.ChargeValid || math.Abs(snap.Charge-0.5) > 1e-9 {
+		t.Fatalf("charge = %v valid = %v, want 0.5 from BAT0 only", snap.Charge, snap.ChargeValid)
+	}
+	if snap.State != BatteryDischarging {
+		t.Fatalf("state = %v, want Discharging (BAT1 present=0 excluded)", snap.State)
+	}
+}
+
+func TestReadBatteryOnlyDeviceScopeIsNotPresent(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "hid-keyboard", map[string]string{
+		"type": "Battery", "status": "Discharging", "scope": "device", "capacity": "55",
+	})
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Present || snap.ChargeValid {
+		t.Fatalf("Device-scope supply treated as system battery: %#v", snap)
+	}
+}

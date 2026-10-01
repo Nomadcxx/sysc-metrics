@@ -62,6 +62,9 @@ func readBattery(root string) (BatterySnapshot, error) {
 		if reading.kind != "Battery" && reading.kind != "UPS" {
 			continue
 		}
+		if !systemScopeSupply(path) {
+			continue
+		}
 		supplies = append(supplies, reading)
 	}
 	if len(supplies) == 0 {
@@ -71,6 +74,20 @@ func readBattery(root string) (BatterySnapshot, error) {
 	snap := aggregateSupplies(now, supplies, &issues)
 	snap.Issues = issues
 	return snap, nil
+}
+
+// systemScopeSupply reports whether a power_supply node counts toward the
+// whole-system battery. Per sysfs-class-power: missing present ⇒ present,
+// present=0 ⇒ absent; missing scope ⇒ System, scope=Device ⇒ peripheral
+// (HID mouse etc.) and excluded (issue #15).
+func systemScopeSupply(dir string) bool {
+	if present, err := readSysfsString(filepath.Join(dir, "present")); err == nil && present == "0" {
+		return false
+	}
+	if scope, err := readSysfsString(filepath.Join(dir, "scope")); err == nil && strings.EqualFold(scope, "Device") {
+		return false
+	}
+	return true
 }
 
 func readSupply(dir string) (supplyReading, error) {
