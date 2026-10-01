@@ -25,12 +25,17 @@ type supplyReading struct {
 	// rather than a capacity fallback; SOC is only aggregated across
 	// same-unit supplies (issue #6).
 	chargeFromEnergy bool
-	energyJ          float64
-	hasEnergy        bool
-	energyFullJ      float64
-	hasEnergyFull    bool
-	watts            float64
-	hasWatts         bool
+	// raw µAh counters behind a charge_* SOC, kept for weighted
+	// multi-pack aggregation (issue #14).
+	chargeAh      float64
+	chargeFullAh  float64
+	hasChargeFull bool
+	energyJ       float64
+	hasEnergy     bool
+	energyFullJ   float64
+	hasEnergyFull bool
+	watts         float64
+	hasWatts      bool
 }
 
 func readBattery(root string) (BatterySnapshot, error) {
@@ -92,6 +97,9 @@ func readSupply(dir string) (supplyReading, error) {
 	} else if chargeNow, err := readSysfsUint(filepath.Join(dir, "charge_now")); err == nil {
 		if chargeFull, err := readSysfsUint(filepath.Join(dir, "charge_full")); err == nil && chargeFull > 0 {
 			out.charge = float64(chargeNow) / float64(chargeFull)
+			out.chargeAh = float64(chargeNow)
+			out.chargeFullAh = float64(chargeFull)
+			out.hasChargeFull = true
 			out.hasCharge = true
 		}
 	}
@@ -122,9 +130,11 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 		energyNowSum   float64
 		energyFullSum  float64
 		capacityCharge float64
+		chargeNowSum   float64
+		chargeFullSum  float64
 		watts          float64
 	)
-	var nEnergy, nCapacity, nWatts int
+	var nEnergy, nCapacity, nChargeFull, nWatts int
 	var sawCharging, sawDischarging, sawFull, sawUnknown bool
 
 	for _, s := range supplies {
@@ -136,6 +146,11 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 		case s.hasCharge:
 			capacityCharge += s.charge
 			nCapacity++
+			if s.hasChargeFull {
+				chargeNowSum += s.chargeAh
+				chargeFullSum += s.chargeFullAh
+				nChargeFull++
+			}
 		}
 		if s.hasEnergy {
 			snap.EnergyJoules += s.energyJ
@@ -185,7 +200,15 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 			})
 		}
 	} else if nCapacity > 0 {
-		snap.Charge = capacityCharge / float64(nCapacity)
+		// Capacity-path SOC: when every supply exposed µAh counters,
+		// weight by capacity (Σ charge_now / Σ charge_full) like the
+		// energy path; a plain mean of ratios mis-sizes unequal packs
+		// (issue #14). Percentage-only packs keep the mean.
+		if nChargeFull == nCapacity && chargeFullSum > 0 {
+			snap.Charge = chargeNowSum / chargeFullSum
+		} else {
+			snap.Charge = capacityCharge / float64(nCapacity)
+		}
 		snap.ChargeValid = true
 	}
 	if snap.Charge < 0 {

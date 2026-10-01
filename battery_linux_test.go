@@ -177,3 +177,24 @@ func TestReadBatteryNegativeCurrentNowStillReportsRate(t *testing.T) {
 		t.Fatalf("rate = %v valid = %v, want 22 W", snap.RateWatts, snap.RateValid)
 	}
 }
+
+func TestReadBatterySOCWeightsByChargeFull(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"charge_now": "90000", "charge_full": "100000",
+	})
+	writeSupply(t, root, "BAT1", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"charge_now": "5000", "charge_full": "10000",
+	})
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Σ now / Σ full = 95000/110000 ≈ 0.8636; averaging ratios gave 0.7 (issue #14).
+	want := 95000.0 / 110000.0
+	if !snap.ChargeValid || math.Abs(snap.Charge-want) > 1e-9 {
+		t.Fatalf("charge = %v valid = %v, want %v", snap.Charge, snap.ChargeValid, want)
+	}
+}
