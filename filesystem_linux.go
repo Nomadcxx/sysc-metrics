@@ -89,20 +89,16 @@ func decodeMountField(value string) (string, error) {
 			return "", fmt.Errorf("truncated escape")
 		}
 		escape := value[i : i+4]
-		var character byte
-		switch escape {
-		case `\040`:
-			character = ' '
-		case `\011`:
-			character = '\t'
-		case `\012`:
-			character = '\n'
-		case `\134`:
-			character = '\\'
-		default:
+		// The kernel mangles mount fields with seq_escape over octal
+		// bytes: mount points use " \t\n\\" but sources additionally
+		// escape '#' as \043 (fs/proc_namespace.c mangle()). Accept any
+		// \NNN; the named cases are \040 space, \011 tab, \012 newline,
+		// \134 backslash (issue #16).
+		character, err := strconv.ParseUint(escape[1:], 8, 8)
+		if err != nil {
 			return "", fmt.Errorf("invalid escape %q", escape)
 		}
-		decoded.WriteByte(character)
+		decoded.WriteByte(byte(character))
 		i += 3
 	}
 	return decoded.String(), nil

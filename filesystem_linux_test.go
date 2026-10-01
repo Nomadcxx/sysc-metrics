@@ -78,3 +78,22 @@ func TestReadFilesystemsPreservesHealthyMounts(t *testing.T) {
 		t.Fatalf("readFilesystems() = %#v, %v", snapshot, err)
 	}
 }
+
+func TestParseMountinfoDecodesGenericOctalEscapes(t *testing.T) {
+	// Kernel mangle() escapes '#' as \043 in mount sources (issue #16).
+	input := "20 1 0:4 / /mnt/pt rw - ext4 label#disk rw\n" +
+		"30 1 0:5 / /mnt/hash\\043point rw - fuse sshfs#host:/x rw\n"
+	mounts, err := parseMountinfo(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("mounts = %d, want 2", len(mounts))
+	}
+	if mounts[0].MountPoint != "/mnt/hash#point" || mounts[0].Source != "sshfs#host:/x" {
+		t.Fatalf("\\043 decode = %#v", mounts[0])
+	}
+	if mounts[1].Source != "label#disk" {
+		t.Fatalf("literal source = %q", mounts[1].Source)
+	}
+}
