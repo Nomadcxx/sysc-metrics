@@ -384,17 +384,6 @@ func (o *fakeOpener) open(pmuType, config uint64) (gpuCounter, error) {
 	return counter, nil
 }
 
-func scriptedClock(times []time.Time) func() time.Time {
-	i := 0
-	return func() time.Time {
-		if i >= len(times) {
-			i = len(times) - 1
-		}
-		i++
-		return times[i-1]
-	}
-}
-
 func testTimes(count int) []time.Time {
 	base := time.Unix(1_700_000_000, 0)
 	times := make([]time.Time, count)
@@ -415,7 +404,25 @@ func failSMI(t *testing.T) func() ([]byte, error) {
 func newTestGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]byte, error), opener *fakeOpener, times []time.Time) *GPUSampler {
 	sampler := newGPUSampler(drmRoot, pmuRoot, pciIDs, smi)
 	sampler.open = opener.open
-	sampler.now = scriptedClock(times)
+	// One scripted instant per Sample, reused for CollectedAt and every
+	// counter-read stamp in that sample. The next Sample advances.
+	seen := 0
+	idx := -1
+	sampler.now = func() time.Time {
+		if len(times) == 0 {
+			return time.Time{}
+		}
+		if sampler.sampleGen != seen {
+			seen = sampler.sampleGen
+			if idx+1 < len(times) {
+				idx++
+			}
+		}
+		if idx < 0 {
+			return times[0]
+		}
+		return times[idx]
+	}
 	// Hermetic: no fdinfo unless a test writes some under its own root.
 	sampler.procRoot = filepath.Join(drmRoot, "no-proc")
 	return sampler
@@ -920,5 +927,170 @@ func TestGPUSamplerCollectedAtUsesSamplerClock(t *testing.T) {
 	}
 	if !snap.CollectedAt.Equal(times[0]) {
 		t.Fatalf("CollectedAt = %v, want scripted clock %v", snap.CollectedAt, times[0])
+	}
+}
+
+// readStretchCounter advances a virtual clock inside read, before the value
+// is returned, so the counter read finishes after any stamp taken earlier.
+type readStretchCounter struct {
+	values  []uint64
+	calls   int
+	stretch func()
+}
+
+func (c *readStretchCounter) read() (uint64, error) {
+	index := c.calls
+	if index >= len(c.values) {
+		index = len(c.values) - 1
+	}
+	c.calls++
+	if c.stretch != nil {
+		c.stretch()
+	}
+	return c.values[index], nil
+}
+
+func (c *readStretchCounter) close() error { return nil }
+
+// pmuReadPlan is a scripted clock whose readGPUs work (nvidia-smi) and
+// counter read both finish after the sample's collection instant.
+type pmuReadPlan struct {
+	base    time.Time
+	poll    time.Duration
+	preRead []time.Duration
+	read    []time.Duration
+	virtual time.Time
+	preN    int
+	readN   int
+}
+
+func (p *pmuReadPlan) readAt(sample int) time.Time {
+	return p.base.Add(time.Duration(sample)*p.poll + p.preRead[sample] + p.read[sample])
+}
+
+func (p *pmuReadPlan) collectedAt(sample int) time.Time {
+	return p.base.Add(time.Duration(sample) * p.poll)
+}
+
+func (p *pmuReadPlan) smi() ([]byte, error) {
+	p.virtual = p.virtual.Add(p.preRead[p.preN])
+	p.preN++
+	return []byte("00000000:01:00.0, 1, 40, 10, 8192, NVIDIA GeForce RTX 4060\n"), nil
+}
+
+func (p *pmuReadPlan) stretch() {
+	p.virtual = p.virtual.Add(p.read[p.readN])
+	p.readN++
+}
+
+func (p *pmuReadPlan) begin(sample int) {
+	p.virtual = p.collectedAt(sample)
+}
+
+// newDelayedReadSampler builds an Intel i915 PMU sampler whose readGPUs
+// path is delayed by nvidia-smi and whose counter read stretches the same
+// clock before it returns.
+func newDelayedReadSampler(t *testing.T, plan *pmuReadPlan, values []uint64) *GPUSampler {
+	t.Helper()
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	writeNvidiaCard(t, root, "card1", "0000:01:00.0", "0x10de", "0x2808")
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	sampler := newTestGPUSampler(root, pmuRoot, nil, plan.smi, &fakeOpener{}, testTimes(len(values)))
+	counter := &readStretchCounter{values: values, stretch: plan.stretch}
+	sampler.open = func(pmuType, config uint64) (gpuCounter, error) {
+		if config != 0 {
+			t.Fatalf("opened unexpected PMU config 0x%x", config)
+		}
+		return counter, nil
+	}
+	sampler.now = func() time.Time { return plan.virtual }
+	return sampler
+}
+
+func requireI915(t *testing.T, snap GPUSnapshot) GPU {
+	t.Helper()
+	intel := i915GPUs(snap)
+	if len(intel) != 1 {
+		t.Fatalf("i915 GPUs = %#v", snap.GPUs)
+	}
+	return intel[0]
+}
+
+// A slower readGPUs plus a counter read that finishes after the collection
+// stamp used to exceed the pre-read elapsed and drop an otherwise valid,
+// fully busy engine (issue #18).
+func TestGPUSamplerPreReadDelayKeepsEngineBusy(t *testing.T) {
+	plan := &pmuReadPlan{
+		base:    time.Unix(1_700_000_000, 0),
+		poll:    time.Second,
+		preRead: []time.Duration{10 * time.Millisecond, 30 * time.Millisecond},
+		read:    []time.Duration{5 * time.Millisecond, 15 * time.Millisecond},
+	}
+	window := plan.readAt(1).Sub(plan.readAt(0))
+	sampler := newDelayedReadSampler(t, plan, []uint64{0, uint64(window)})
+
+	plan.begin(0)
+	first, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.CollectedAt.Equal(plan.collectedAt(0)) {
+		t.Fatalf("first CollectedAt = %v, want %v", first.CollectedAt, plan.collectedAt(0))
+	}
+	if g := requireI915(t, first); g.Usage.Valid {
+		t.Fatalf("first sample has valid usage: %#v", g.Usage)
+	}
+
+	plan.begin(1)
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.CollectedAt.Equal(plan.collectedAt(1)) {
+		t.Fatalf("second CollectedAt = %v, want collection instant %v (read finished at %v)", second.CollectedAt, plan.collectedAt(1), plan.readAt(1))
+	}
+	g := requireI915(t, second)
+	if !g.Usage.Valid || g.Usage.Fraction != 1 || g.Usage.Fraction < 0 || g.Usage.Fraction > 1 {
+		t.Fatalf("usage = %#v, want valid fraction 1 over the read-to-read window %v", g.Usage, window)
+	}
+}
+
+// A counter that jumps by more than the interval between counter reads stays
+// invalid and rebaselines; the following sample uses that new baseline.
+func TestGPUSamplerDeltaBeyondReadIntervalRebaselines(t *testing.T) {
+	plan := &pmuReadPlan{
+		base:    time.Unix(1_700_000_000, 0),
+		poll:    time.Second,
+		preRead: []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 10 * time.Millisecond},
+		read:    []time.Duration{5 * time.Millisecond, 15 * time.Millisecond, 5 * time.Millisecond},
+	}
+	firstWindow := plan.readAt(1).Sub(plan.readAt(0))
+	secondWindow := plan.readAt(2).Sub(plan.readAt(1))
+	jumped := uint64(firstWindow) + uint64(time.Millisecond)
+	half := uint64(secondWindow / 2)
+	sampler := newDelayedReadSampler(t, plan, []uint64{0, jumped, jumped + half})
+
+	plan.begin(0)
+	if _, err := sampler.Sample(); err != nil {
+		t.Fatal(err)
+	}
+	plan.begin(1)
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := requireI915(t, second); g.Usage.Valid {
+		t.Fatalf("delta past the read window produced valid usage: %#v", g.Usage)
+	}
+	plan.begin(2)
+	third, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := requireI915(t, third)
+	if !g.Usage.Valid || g.Usage.Fraction != 0.5 || g.Usage.Fraction < 0 || g.Usage.Fraction > 1 {
+		t.Fatalf("post-rebaseline usage = %#v, want 0.5 of the read-to-read window %v", g.Usage, secondWindow)
 	}
 }

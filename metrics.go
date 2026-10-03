@@ -315,15 +315,17 @@ func ReadGPU() (GPUSnapshot, error) {
 // descriptor each sample, and only while some GPU lacks usage. Other users'
 // clients are invisible to that walk, so usage can stay invalid.
 type GPUSampler struct {
-	drmRoot     string
-	pmuRoot     string
-	pciIDs      []string
-	smi         func() ([]byte, error)
-	now         func() time.Time
-	open        func(pmuType, config uint64) (gpuCounter, error)
-	engines     map[string]*gpuPMUState
-	hasPrevious bool
-	previousAt  time.Time
+	drmRoot string
+	pmuRoot string
+	pciIDs  []string
+	smi     func() ([]byte, error)
+	now     func() time.Time
+	open    func(pmuType, config uint64) (gpuCounter, error)
+	engines map[string]*gpuPMUState
+	// sampleGen increments once per Sample. A scripted now can return one
+	// instant for every clock read in that sample; production time.Now
+	// ignores it.
+	sampleGen int
 	// DRM client fdinfo: the unprivileged usage path for GPUs whose
 	// driver and PMU give no busy figure.
 	procRoot  string
