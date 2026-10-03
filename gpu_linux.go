@@ -368,6 +368,7 @@ type gpuEngineState struct {
 	counter  gpuCounter
 	value    uint64
 	hasValue bool
+	readAt   time.Time // sampler clock when this counter was last read
 }
 
 type gpuPMUState struct {
@@ -390,13 +391,17 @@ func newGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]byte,
 
 // Sample returns one GPU snapshot. The sampler is not safe for concurrent use.
 func (s *GPUSampler) Sample() (GPUSnapshot, error) {
-	now := s.now()
-	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi, now)
+	s.sampleGen++
+	// CollectedAt stays this instant (issue #4). PMU elapsed is not taken
+	// here: the counter read happens after readGPUs, and a stamp this early
+	// drops a full engine as an impossible delta (issue #18).
+	collectedAt := s.now()
+	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi, collectedAt)
 	if err != nil {
 		return GPUSnapshot{}, err
 	}
-	s.applyIntelPMU(now, found, &snapshot)
-	s.applyFDInfo(now, found, &snapshot)
+	s.applyIntelPMU(found, &snapshot)
+	s.applyFDInfo(collectedAt, found, &snapshot)
 	return snapshot, nil
 }
 
@@ -410,7 +415,6 @@ func (s *GPUSampler) Close() error {
 		}
 	}
 	s.engines = make(map[string]*gpuPMUState)
-	s.hasPrevious = false
 	s.fdPrev, s.fdHasPrev, s.fdEmpty, s.fdIdle = nil, false, 0, 0
 	return closeErr
 }
@@ -418,11 +422,7 @@ func (s *GPUSampler) Close() error {
 // applyIntelPMU layers i915 PMU engine usage onto the DRM snapshot. State is
 // keyed by PCI BDF; engines of GPUs that disappeared are closed and dropped,
 // so a reappearance starts from a fresh baseline.
-func (s *GPUSampler) applyIntelPMU(now time.Time, found []gpuFound, snapshot *GPUSnapshot) {
-	elapsed := time.Duration(0)
-	if s.hasPrevious {
-		elapsed = now.Sub(s.previousAt)
-	}
+func (s *GPUSampler) applyIntelPMU(found []gpuFound, snapshot *GPUSnapshot) {
 	var refs []gpuRef
 	var intel []int
 	for i, f := range found {
@@ -453,7 +453,7 @@ func (s *GPUSampler) applyIntelPMU(now time.Time, found []gpuFound, snapshot *GP
 				s.engines[f.bdf] = state
 				snapshot.Issues = append(snapshot.Issues, issues...)
 			}
-			s.sampleGPU(state, &snapshot.GPUs[i], elapsed, snapshot)
+			s.sampleGPU(state, &snapshot.GPUs[i], snapshot)
 		}
 	}
 	for key, state := range s.engines {
@@ -462,8 +462,6 @@ func (s *GPUSampler) applyIntelPMU(now time.Time, found []gpuFound, snapshot *GP
 			delete(s.engines, key)
 		}
 	}
-	s.hasPrevious = true
-	s.previousAt = now
 }
 
 func newGPUPMUState(pmu pmuCandidate) (*gpuPMUState, []Issue) {
@@ -478,7 +476,11 @@ func newGPUPMUState(pmu pmuCandidate) (*gpuPMUState, []Issue) {
 // sampleGPU reads every engine counter of one mapped GPU. Any open failure,
 // read failure, or rebaseline leaves that sample's usage invalid; partial
 // engine data never fabricates a device-wide percentage.
-func (s *GPUSampler) sampleGPU(state *gpuPMUState, gpu *GPU, elapsed time.Duration, snapshot *GPUSnapshot) {
+//
+// Elapsed is the gap between this engine's counter reads. The clock is read
+// after read returns, so time spent in readGPUs or inside the read itself
+// is part of the window instead of an impossible delta (issue #18).
+func (s *GPUSampler) sampleGPU(state *gpuPMUState, gpu *GPU, snapshot *GPUSnapshot) {
 	if len(state.engines) == 0 {
 		snapshot.Issues = append(snapshot.Issues, Issue{
 			Source: filepath.Join(state.pmu.root, "events"),
@@ -508,12 +510,17 @@ func (s *GPUSampler) sampleGPU(state *gpuPMUState, gpu *GPU, elapsed time.Durati
 			valid = false
 			continue
 		}
+		readAt := s.now()
+		elapsed := time.Duration(0)
+		if engine.hasValue {
+			elapsed = readAt.Sub(engine.readAt)
+		}
 		if fraction, ok := engineBusy(engine.value, value, engine.hasValue, elapsed); ok {
 			fractions = append(fractions, fraction)
 		} else {
 			valid = false
 		}
-		engine.value, engine.hasValue = value, true
+		engine.value, engine.hasValue, engine.readAt = value, true, readAt
 	}
 	if valid {
 		gpu.Usage = GPUUsage{Fraction: maxBusyFraction(fractions), Valid: true}
