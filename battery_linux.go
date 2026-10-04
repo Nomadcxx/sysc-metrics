@@ -133,8 +133,12 @@ func readSupply(dir string) (supplyReading, error) {
 			out.hasCharge = true
 		}
 	}
-	if powerNow, err := readSysfsUint(filepath.Join(dir, "power_now")); err == nil {
-		out.watts = float64(powerNow) / 1e6
+	if powerNow, err := readSysfsInt(filepath.Join(dir, "power_now")); err == nil {
+		// power_now is signed µW (negative while discharging, same
+		// convention as current_now). The rate is a magnitude either
+		// way; unsigned ParseUint dropped the discharge rate and ETA
+		// (issue #22).
+		out.watts = math.Abs(float64(powerNow)) / 1e6
 		out.hasWatts = true
 	} else if currentNow, err := readSysfsInt(filepath.Join(dir, "current_now")); err == nil {
 		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil {
@@ -285,4 +289,4 @@ func readSysfsUint(path string) (uint64, error) {
 }
 
 // readSysfsInt (shared, thermal_linux.go) parses signed sysfs values such
-// as current_now.
+// as power_now and current_now.
