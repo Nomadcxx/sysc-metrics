@@ -225,8 +225,9 @@ func TestProcessSamplerInvalidatesImpossibleCPUDelta(t *testing.T) {
 	if _, err := sampler.Sample(); err != nil {
 		t.Fatal(err)
 	}
-	// The system advanced 10 jiffies while the process claims 20 (stale or
-	// raced /proc/stat): Fraction would exceed 1, so it must be invalid.
+	// Both aggregate reads see 110. The process advanced 20 against that
+	// 10-tick window, which is still above 1 once the reads cover it, so
+	// the sample stays invalid.
 	writeProcStat(t, root, 110)
 	writeProcess(t, root, 42, "worker", 1, 30, 991, 1000, 40, []string{"worker"})
 	snap, err := sampler.Sample()
@@ -239,4 +240,80 @@ func TestProcessSamplerInvalidatesImpossibleCPUDelta(t *testing.T) {
 	if snap.Processes[0].CPU.Valid {
 		t.Fatalf("impossible fraction accepted: %#v", snap.Processes[0].CPU)
 	}
+}
+
+// Aggregate /proc/stat used to be read once, before the walk. A saturated
+// process reached a few milliseconds later then led that total — 801 process
+// ticks against an 800-tick aggregate — and CPU.Valid stayed false (issue #21).
+//
+// Each sample's first total is the pre-walk read and its second is the
+// post-walk read:
+//
+//	sample 1: before 1000, process 100, after 1050
+//	sample 2: before 1800 (delta 800 from the previous pre-walk read),
+//	          process 901 (delta 801), after 1801
+//
+// Using the opening read as the window end drops the process. The previous
+// pre-walk total through this post-walk total is 801 and covers both process
+// reads, so the fraction is 1. Closing the window with the post-walk reads
+// alone (1801-1050) is still short of 801 when the process was reached later
+// on the previous walk.
+func TestProcessSamplerKeepsSaturatedProcessInsideAggregateWindow(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 0)
+	writeProcess(t, root, 42, "worker", 1, 100, 991, 1000, 40, []string{"worker"})
+	totals := &scriptedCPUTotals{}
+	totals.set(1000, 1050)
+	sampler := newProcessSampler(root)
+	sampler.readTotal = totals.read
+
+	first, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Processes) != 1 || first.Processes[0].CPU.Valid {
+		t.Fatalf("first snapshot = %#v", first)
+	}
+	if totals.reads != 2 {
+		t.Fatalf("first sample aggregate reads = %d, want 2 (before and after the walk)", totals.reads)
+	}
+
+	totals.set(1800, 1801)
+	writeProcess(t, root, 42, "worker", 1, 901, 991, 1000, 40, []string{"worker"})
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.reads != 2 {
+		t.Fatalf("second sample aggregate reads = %d, want 2 (before and after the walk)", totals.reads)
+	}
+	if len(second.Processes) != 1 {
+		t.Fatalf("processes = %#v", second.Processes)
+	}
+	cpu := second.Processes[0].CPU
+	if !cpu.Valid || cpu.Fraction != 1 || cpu.Fraction > 1 {
+		t.Fatalf("CPU = %#v, want valid fraction 1 (801 process ticks inside the covering aggregate window, not the 800-tick pre-walk delta)", cpu)
+	}
+}
+
+// scriptedCPUTotals returns the pre-walk aggregate on the first read of a
+// sample and the post-walk aggregate on every read after that.
+type scriptedCPUTotals struct {
+	before uint64
+	after  uint64
+	reads  int
+}
+
+func (s *scriptedCPUTotals) set(before, after uint64) {
+	s.before = before
+	s.after = after
+	s.reads = 0
+}
+
+func (s *scriptedCPUTotals) read() (uint64, error) {
+	s.reads++
+	if s.reads == 1 {
+		return s.before, nil
+	}
+	return s.after, nil
 }

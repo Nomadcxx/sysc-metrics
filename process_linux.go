@@ -148,6 +148,9 @@ func readProcessArgs(path string) ([]string, error) {
 }
 
 func (s *ProcessSampler) readTotalCPUTicks() (uint64, error) {
+	if s.readTotal != nil {
+		return s.readTotal()
+	}
 	path := filepath.Join(s.root, "stat")
 	file, err := os.Open(path)
 	if err != nil {
@@ -166,9 +169,16 @@ func (s *ProcessSampler) readTotalCPUTicks() (uint64, error) {
 }
 
 // Sample returns one process snapshot. The sampler is not safe for concurrent use.
+//
+// Aggregate ticks are read before the walk and again after every process
+// stat. The window for this sample runs from the previous pre-walk read to
+// this post-walk read, which covers both process observations. A saturated
+// process read later than the opening /proc/stat therefore stays inside the
+// fraction instead of being dropped (issue #21). A delta that still exceeds
+// that covering window is a counter regression and stays invalid (issue #7).
 func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 	at := time.Now()
-	total, err := s.readTotalCPUTicks()
+	totalBefore, err := s.readTotalCPUTicks()
 	if err != nil {
 		return ProcessSnapshot{}, err
 	}
@@ -179,7 +189,6 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 
 	snapshot := ProcessSnapshot{CollectedAt: at}
 	current := make(map[ProcessIdentity]uint64)
-	totalDeltaValid := s.hasPrevious && total > s.previousTotal
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -205,19 +214,6 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		identity := ProcessIdentity{PID: stat.pid, StartTimeTicks: stat.startTimeTicks}
 		process := Process{Identity: identity, Name: stat.name, ParentPID: stat.parentPID}
 		current[identity] = stat.cpuTicks
-		if previous, ok := s.previous[identity]; totalDeltaValid && ok && stat.cpuTicks >= previous {
-			delta := stat.cpuTicks - previous
-			// A process cannot burn more CPU than existed in the window. A
-			// delta above the total means /proc/stat was sampled before the
-			// walk (or a host rollover); report invalid rather than a
-			// >1 "fraction" (issue #7).
-			if delta <= total-s.previousTotal {
-				process.CPU = CPUUsage{
-					Fraction: float64(delta) / float64(total-s.previousTotal),
-					Valid:    true,
-				}
-			}
-		}
 
 		statusPath := filepath.Join(dir, "status")
 		statusFile, err := os.Open(statusPath)
@@ -243,10 +239,36 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		}
 		snapshot.Processes = append(snapshot.Processes, process)
 	}
+
+	totalAfter, err := s.readTotalCPUTicks()
+	if err != nil {
+		return ProcessSnapshot{}, err
+	}
+	if s.hasPrevious && totalAfter > s.previousTotal {
+		totalDelta := totalAfter - s.previousTotal
+		for i := range snapshot.Processes {
+			ticks, ok := current[snapshot.Processes[i].Identity]
+			if !ok {
+				continue
+			}
+			previous, ok := s.previous[snapshot.Processes[i].Identity]
+			if !ok || ticks < previous {
+				continue
+			}
+			delta := ticks - previous
+			if delta <= totalDelta {
+				snapshot.Processes[i].CPU = CPUUsage{
+					Fraction: float64(delta) / float64(totalDelta),
+					Valid:    true,
+				}
+			}
+		}
+	}
+
 	sort.Slice(snapshot.Processes, func(i, j int) bool {
 		return snapshot.Processes[i].Identity.PID < snapshot.Processes[j].Identity.PID
 	})
-	s.previousTotal = total
+	s.previousTotal = totalBefore
 	s.previous = current
 	s.hasPrevious = true
 	return snapshot, nil
