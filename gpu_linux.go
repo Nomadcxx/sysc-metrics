@@ -394,14 +394,16 @@ func (s *GPUSampler) Sample() (GPUSnapshot, error) {
 	s.sampleGen++
 	// CollectedAt stays this instant (issue #4). PMU elapsed is not taken
 	// here: the counter read happens after readGPUs, and a stamp this early
-	// drops a full engine as an impossible delta (issue #18).
+	// drops a full engine as an impossible delta (issue #18). fdinfo elapsed
+	// is the gap between its own reads, stamped when readDRMClients returns;
+	// using this earlier stamp clamps a late read to 1 (issue #25).
 	collectedAt := s.now()
 	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi, collectedAt)
 	if err != nil {
 		return GPUSnapshot{}, err
 	}
 	s.applyIntelPMU(found, &snapshot)
-	s.applyFDInfo(collectedAt, found, &snapshot)
+	s.applyFDInfo(found, &snapshot)
 	return snapshot, nil
 }
 
