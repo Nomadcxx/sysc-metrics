@@ -241,3 +241,76 @@ func TestFDInfoBusySkipsNewEngineClassOnExistingClient(t *testing.T) {
 		t.Fatalf("busy = %v ok = %v, want 0.5 from the steady render delta", busy, ok)
 	}
 }
+
+// A later fdinfo read than the collection stamp used to divide engine time
+// by that pre-read gap and clamp the fraction to 1 (issue #25). 1.04s of
+// render busy over a 1.0s stamp is 0.8 of the 1.3s read-to-read window.
+// The following sample is faster than the last and must not under-report
+// by the same skew. CollectedAt stays the pre-read instant.
+func TestGPUSamplerFDInfoElapsedFollowsReadInterval(t *testing.T) {
+	const busyNS = 1_040_000_000 // 1.04s
+	plan := &pmuReadPlan{
+		base: time.Unix(1_700_000_000, 0),
+		poll: time.Second,
+		preRead: []time.Duration{
+			100 * time.Millisecond,
+			400 * time.Millisecond,
+			100 * time.Millisecond,
+		},
+	}
+	lateWindow := plan.poll + (plan.preRead[1] - plan.preRead[0])
+	lateWant := float64(busyNS) / float64(lateWindow)
+	fastBusy := uint64(560_000_000) // 0.56s
+	fastWindow := plan.poll + (plan.preRead[2] - plan.preRead[1])
+	fastWant := float64(fastBusy) / float64(fastWindow)
+
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	writeNvidiaCard(t, root, "card1", "0000:01:00.0", "0x10de", "0x2808")
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	opener := &fakeOpener{failed: map[uint64]error{0x0: os.ErrPermission}}
+	sampler := newTestGPUSampler(root, pmuRoot, nil, plan.smi, opener, nil)
+	sampler.now = func() time.Time { return plan.virtual }
+	proc := t.TempDir()
+	sampler.procRoot = proc
+
+	writeFDInfo(t, proc, 100, 7, fdinfoBody("0000:00:02.0", "126", 0, 0))
+	plan.begin(0)
+	first, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.CollectedAt.Equal(plan.collectedAt(0)) {
+		t.Fatalf("first CollectedAt = %v, want %v", first.CollectedAt, plan.collectedAt(0))
+	}
+	if g := requireI915(t, first); g.Usage.Valid {
+		t.Fatalf("first sample has valid usage: %#v", g.Usage)
+	}
+
+	writeFDInfo(t, proc, 100, 7, fdinfoBody("0000:00:02.0", "126", busyNS, 0))
+	plan.begin(1)
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.CollectedAt.Equal(plan.collectedAt(1)) {
+		t.Fatalf("second CollectedAt = %v, want collection instant %v", second.CollectedAt, plan.collectedAt(1))
+	}
+	if g := requireI915(t, second); !g.Usage.Valid || g.Usage.Fraction != lateWant {
+		t.Fatalf("usage = %#v, want %v over the %v read-to-read window (stamp gap %v)", g.Usage, lateWant, lateWindow, plan.poll)
+	}
+
+	writeFDInfo(t, proc, 100, 7, fdinfoBody("0000:00:02.0", "126", busyNS+fastBusy, 0))
+	plan.begin(2)
+	third, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !third.CollectedAt.Equal(plan.collectedAt(2)) {
+		t.Fatalf("third CollectedAt = %v, want collection instant %v", third.CollectedAt, plan.collectedAt(2))
+	}
+	if g := requireI915(t, third); !g.Usage.Valid || g.Usage.Fraction != fastWant {
+		t.Fatalf("usage = %#v, want %v over the %v read-to-read window (stamp gap %v)", g.Usage, fastWant, fastWindow, plan.poll)
+	}
+}

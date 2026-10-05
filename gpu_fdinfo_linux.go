@@ -173,7 +173,12 @@ func fdinfoBusy(prev, cur map[string]drmClient, elapsed time.Duration) (float64,
 // PMU needs CAP_PERFMON, which a desktop shell does not hold. /proc is walked
 // only while some GPU still lacks usage, and backs off when the walk keeps
 // finding no engine data for any of them.
-func (s *GPUSampler) applyFDInfo(now time.Time, found []gpuFound, snapshot *GPUSnapshot) {
+//
+// Elapsed is the gap between fdinfo reads. The clock is read after
+// readDRMClients returns, so time spent in readGPUs (pci.ids, nvidia-smi)
+// or the PMU reads is part of the window. Dividing by the earlier
+// collection stamp clamps a late read to 1 (issue #25).
+func (s *GPUSampler) applyFDInfo(found []gpuFound, snapshot *GPUSnapshot) {
 	var missing []int
 	for i := range snapshot.GPUs {
 		if !snapshot.GPUs[i].Usage.Valid && found[i].bdf != "" {
@@ -193,6 +198,7 @@ func (s *GPUSampler) applyFDInfo(now time.Time, found []gpuFound, snapshot *GPUS
 	}
 
 	clients := readDRMClients(s.procRoot)
+	readAt := s.now()
 	s.fdWalks++
 	anyData := false
 	for _, i := range missing {
@@ -214,7 +220,7 @@ func (s *GPUSampler) applyFDInfo(now time.Time, found []gpuFound, snapshot *GPUS
 
 	filled := false
 	if s.fdHasPrev {
-		elapsed := now.Sub(s.fdPrevAt)
+		elapsed := readAt.Sub(s.fdPrevAt)
 		for _, i := range missing {
 			bdf := strings.ToLower(found[i].bdf)
 			if busy, ok := fdinfoBusy(s.fdPrev[bdf], clients[bdf], elapsed); ok {
@@ -223,7 +229,7 @@ func (s *GPUSampler) applyFDInfo(now time.Time, found []gpuFound, snapshot *GPUS
 			}
 		}
 	}
-	s.fdPrev, s.fdPrevAt, s.fdHasPrev = clients, now, true
+	s.fdPrev, s.fdPrevAt, s.fdHasPrev = clients, readAt, true
 	if filled {
 		s.dropPMUIssuesIfCovered(snapshot)
 	}
