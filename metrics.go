@@ -212,12 +212,19 @@ type ProcessSnapshot struct {
 }
 
 // ProcessSampler retains previous process and aggregate CPU counters for
-// sequential rate sampling.
+// sequential rate sampling. previousTotal is the aggregate tick count read
+// before the previous process walk. The next sample closes that window with
+// a second read taken after its own walk, so both process stats fall inside
+// it.
 type ProcessSampler struct {
 	root          string
 	previousTotal uint64
 	previous      map[ProcessIdentity]uint64
 	hasPrevious   bool
+	// readTotal, when set, replaces the aggregate tick read from <root>/stat.
+	// Production leaves it nil. Tests use it to move the total between the
+	// pre-walk and post-walk reads.
+	readTotal func() (uint64, error)
 }
 
 // NewProcessSampler returns a process sampler owned by one sequential polling caller.
