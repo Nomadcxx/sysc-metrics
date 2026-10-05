@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeSupply(t *testing.T, root, name string, files map[string]string) {
@@ -158,6 +159,31 @@ func TestReadBatteryImplausibleRateKeepsTimeInvalid(t *testing.T) {
 	// negative TimeRemaining that was still marked valid (issue #11).
 	if snap.TimeValid {
 		t.Fatalf("overflowing ETA accepted: %v valid", snap.TimeRemaining)
+	}
+}
+
+func TestReadBatteryNegativePowerNowStillReportsRateAndETA(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now": "40000000", "energy_full": "80000000",
+		"power_now": "-20000000",
+	})
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// energy_* SOC is independent of the power sign.
+	if !snap.ChargeValid || math.Abs(snap.Charge-0.5) > 1e-9 {
+		t.Fatalf("charge = %v valid = %v, want 0.5", snap.Charge, snap.ChargeValid)
+	}
+	// -20 W magnitude; unsigned ParseUint dropped the rate and the ETA (issue #22).
+	if !snap.RateValid || math.Abs(snap.RateWatts-20) > 1e-9 {
+		t.Fatalf("rate = %v valid = %v, want 20 W", snap.RateWatts, snap.RateValid)
+	}
+	// 144 kJ / 20 W = 2 h.
+	if !snap.TimeValid || snap.TimeRemaining != 2*time.Hour {
+		t.Fatalf("time remaining = %v valid = %v, want 2h", snap.TimeRemaining, snap.TimeValid)
 	}
 }
 
