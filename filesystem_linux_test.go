@@ -97,3 +97,27 @@ func TestParseMountinfoDecodesGenericOctalEscapes(t *testing.T) {
 		t.Fatalf("literal source = %q", mounts[1].Source)
 	}
 }
+
+func TestStatfsCapacityPrefersFrsize(t *testing.T) {
+	cases := []struct {
+		name string
+		stat syscall.Statfs_t
+		want Capacity
+	}{
+		{"frsize wins when different", syscall.Statfs_t{Blocks: 100, Bfree: 20, Bavail: 15, Bsize: 4096, Frsize: 512},
+			Capacity{TotalBytes: 51200, UsedBytes: 40960, AvailableBytes: 7680}},
+		{"frsize rescues zero bsize", syscall.Statfs_t{Blocks: 10, Bfree: 0, Bavail: 0, Bsize: 0, Frsize: 1024},
+			Capacity{TotalBytes: 10240, UsedBytes: 10240, AvailableBytes: 0}},
+		{"nonpositive frsize falls back to bsize", syscall.Statfs_t{Blocks: 10, Bfree: 0, Bavail: 0, Bsize: 1024, Frsize: -5},
+			Capacity{TotalBytes: 10240, UsedBytes: 10240, AvailableBytes: 0}},
+	}
+	for _, c := range cases {
+		got, err := statfsCapacity(c.stat)
+		if err != nil || got != c.want {
+			t.Fatalf("%s: statfsCapacity() = %#v, %v, want %#v", c.name, got, err, c.want)
+		}
+	}
+	if _, err := statfsCapacity(syscall.Statfs_t{Blocks: 1, Bsize: 0, Frsize: 0}); err == nil {
+		t.Fatal("zero bsize with zero frsize must still fail")
+	}
+}
