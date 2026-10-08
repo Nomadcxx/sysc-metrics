@@ -127,11 +127,32 @@ func discoverGPUPMUs(devicesRoot, driver string) ([]pmuCandidate, []Issue) {
 		candidate := pmuCandidate{name: name, root: root, driver: driver, pmuType: pmuType}
 		if link, err := os.Readlink(filepath.Join(root, "device")); err == nil {
 			candidate.bdf = filepath.Base(filepath.Clean(link))
+		} else if bdf, ok := pmuNameBDF(name, driver); ok {
+			candidate.bdf = bdf
 		}
 		candidates = append(candidates, candidate)
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].name < candidates[j].name })
 	return candidates, issues
+}
+
+// pmuNameBDF recovers the PCI address from a per-device PMU name. i915
+// names a discrete GPU's PMU "i915_<dev_name>" with ':' replaced by '_'
+// (i915_pmu_register); a PCI dev_name has no '_' of its own, so every
+// remaining underscore is a colon of the BDF.
+func pmuNameBDF(name, driver string) (string, bool) {
+	suffix, ok := strings.CutPrefix(name, driver+"_")
+	if !ok || suffix == "" {
+		return "", false
+	}
+	bdf := strings.ToLower(strings.ReplaceAll(suffix, "_", ":"))
+	if strings.Count(bdf, ":") != 2 || !strings.Contains(bdf, ".") {
+		return "", false
+	}
+	if _, _, ok := splitBDF(bdf); !ok {
+		return "", false
+	}
+	return bdf, true
 }
 
 // discoverBusyEvents parses every *-busy event definition under the PMU's
@@ -188,8 +209,9 @@ func discoverBusyEvents(pmuRoot string) ([]pmuEvent, []Issue) {
 }
 
 // mapGPUPMUs assigns each GPU the index of its PMU candidate, or -1. A PMU
-// with a device link maps by PCI BDF and driver. A driver-named PMU without a
-// link may serve the single GPU carrying that driver that no link claimed,
+// with a device link maps by PCI BDF and driver; without a link, the BDF
+// recovered from a per-device name maps the same way. A driver-named PMU
+// without a link may serve the single GPU carrying that driver that no link claimed,
 // when it is the only such candidate; per-device-named candidates stay
 // link-authoritative, and ambiguity stays unmapped.
 func mapGPUPMUs(gpus []gpuRef, candidates []pmuCandidate) []int {
@@ -207,7 +229,7 @@ func mapGPUPMUs(gpus []gpuRef, candidates []pmuCandidate) []int {
 			if claimed[j] || candidate.bdf == "" || candidate.driver != gpu.driver {
 				continue
 			}
-			if candidate.bdf == gpu.bdf {
+			if matchBDF(candidate.bdf, gpu.bdf) {
 				mapped[i] = j
 				claimed[j] = true
 				break
