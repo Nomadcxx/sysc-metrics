@@ -287,3 +287,57 @@ func TestReadBatteryChargeSOCWhenEnergyFullUnusable(t *testing.T) {
 		t.Fatalf("energy = %v, want %v kept from energy_now", snap.EnergyJoules, want)
 	}
 }
+
+func TestBatteryChargeOnlySupplyDerivesEnergyAndETA(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type":        "Battery",
+		"status":      "Discharging",
+		"charge_now":  "2000000",
+		"charge_full": "4000000",
+		"voltage_now": "12000000",
+		"current_now": "-1000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2e6 µAh × 1.2e7 µV / 1e12 = 24 Wh = 86400 J; drain 12 W → 2 h.
+	if want := 86400.0; math.Abs(snap.EnergyJoules-want) > 1e-9 {
+		t.Fatalf("EnergyJoules = %v, want %v derived from charge_now × voltage_now", snap.EnergyJoules, want)
+	}
+	if !snap.TimeValid || snap.TimeRemaining != 2*time.Hour {
+		t.Fatalf("time remaining = %v valid = %v, want 2h", snap.TimeRemaining, snap.TimeValid)
+	}
+}
+
+func TestBatteryMixedFleetETAUsesEnergyAlignedWatts(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type":        "Battery",
+		"status":      "Discharging",
+		"energy_now":  "3600000",
+		"energy_full": "7200000",
+		"power_now":   "6000000",
+	})
+	writeSupply(t, root, "BAT1", map[string]string{
+		"type":      "Battery",
+		"status":    "Discharging",
+		"power_now": "6000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.RateValid || math.Abs(snap.RateWatts-12) > 1e-9 {
+		t.Fatalf("RateWatts = %v valid = %v, want the full 12 W", snap.RateWatts, snap.RateValid)
+	}
+	// 12960 J of metered energy against the 6 W that pack reports:
+	// 36 min. The fleet-wide 12 W would claim 18 min for energy the
+	// watts-only pack never accounted (issue #31).
+	if !snap.TimeValid || snap.TimeRemaining != 36*time.Minute {
+		t.Fatalf("time remaining = %v valid = %v, want 36m", snap.TimeRemaining, snap.TimeValid)
+	}
+}
