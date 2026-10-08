@@ -100,10 +100,23 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error), now t
 			// reported, not silently treated as "no sensor" (issue #3).
 			issues = append(issues, Issue{Source: busyPath, Err: err})
 		}
-		if used, err := readSysfsUint(filepath.Join(dev, "mem_info_vram_used")); err == nil {
-			if total, err := readSysfsUint(filepath.Join(dev, "mem_info_vram_total")); err == nil {
-				g.VRAM, g.VRAMValid = vramCapacity(used, total)
+		usedPath := filepath.Join(dev, "mem_info_vram_used")
+		totalPath := filepath.Join(dev, "mem_info_vram_total")
+		used, usedErr := readSysfsUint(usedPath)
+		total, totalErr := readSysfsUint(totalPath)
+		// Absent on both sides (or one side) is "no VRAM reporting driver";
+		// present-but-unreadable is a fault and must be reported (issue #35,
+		// same rule as gpu_busy_percent under issue #3).
+		for _, pair := range []struct {
+			path string
+			err  error
+		}{{usedPath, usedErr}, {totalPath, totalErr}} {
+			if pair.err != nil && !os.IsNotExist(pair.err) {
+				issues = append(issues, Issue{Source: pair.path, Err: pair.err})
 			}
+		}
+		if usedErr == nil && totalErr == nil {
+			g.VRAM, g.VRAMValid = vramCapacity(used, total)
 		}
 		if c, ok := readGPUHwmonTemp(dev, &issues); ok {
 			g.Celsius, g.TempValid = c, true
@@ -134,9 +147,11 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error), now t
 }
 
 // vramCapacity builds a Capacity from used and total bytes. A zero total is
-// not a device with no memory; it is a driver that did not report one.
+// not a device with no memory; it is a driver that did not report one. Used
+// above total is the same kind of nonsense (issue #35): the pair is
+// rejected, not clamped, so no consumer trusts a broken figure.
 func vramCapacity(used, total uint64) (Capacity, bool) {
-	if total == 0 {
+	if total == 0 || used > total {
 		return Capacity{}, false
 	}
 	c := Capacity{TotalBytes: total, UsedBytes: used}

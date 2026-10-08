@@ -75,6 +75,33 @@ func TestGPUReadsAmdBusyAndTempAndSkipsSimpleDRM(t *testing.T) {
 	}
 }
 
+func TestGPUReportsUnreadableVRAMFile(t *testing.T) {
+	root := t.TempDir()
+	dev := writeDRMCard(t, root, "card0", "amdgpu", "0x1002", "0x744c",
+		map[string]string{"mem_info_vram_used": "1"})
+	// Present but unreadable: a directory where the total file belongs
+	// (issue #35, same rule as gpu_busy_percent under issue #3).
+	if err := os.Mkdir(filepath.Join(dev, "mem_info_vram_total"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := readGPU(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.GPUs[0].VRAMValid {
+		t.Fatal("VRAM marked valid with an unreadable total")
+	}
+	issueFound := false
+	for _, is := range snap.Issues {
+		if strings.Contains(is.Source, "mem_info_vram_total") {
+			issueFound = true
+		}
+	}
+	if !issueFound {
+		t.Fatalf("issues = %#v, want one for mem_info_vram_total", snap.Issues)
+	}
+}
+
 func TestGPUReadsAmdVRAM(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -92,10 +119,10 @@ func TestGPUReadsAmdVRAM(t *testing.T) {
 		}, true, Capacity{TotalBytes: 536870912, UsedBytes: 268435456, AvailableBytes: 268435456}},
 		{"total missing", map[string]string{"mem_info_vram_used": "1"}, false, Capacity{}},
 		{"total zero", map[string]string{"mem_info_vram_used": "1", "mem_info_vram_total": "0"}, false, Capacity{}},
-		{"used above total clamps available", map[string]string{
+		{"used above total is invalid", map[string]string{
 			"mem_info_vram_used":  "9",
 			"mem_info_vram_total": "8",
-		}, true, Capacity{TotalBytes: 8, UsedBytes: 9, AvailableBytes: 0}},
+		}, false, Capacity{}},
 		{"no files", nil, false, Capacity{}},
 	}
 	for _, tt := range tests {
