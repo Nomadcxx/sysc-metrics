@@ -126,6 +126,11 @@ func blockRates(previous blockState, current BlockDevice, elapsed time.Duration)
 		BusyFraction:             float64(current.Busy-previous.busy) / float64(elapsed),
 		Valid:                    true,
 	}
+	// Busy ticks can outrun the wall clock between reads (counter granularity);
+	// saturate at 1 instead of invalidating every other rate (issue #34).
+	if rates.BusyFraction > 1 {
+		rates.BusyFraction = 1
+	}
 	if math.IsNaN(rates.ReadBytesPerSecond) || math.IsInf(rates.ReadBytesPerSecond, 0) || math.IsNaN(rates.WriteBytesPerSecond) || math.IsInf(rates.WriteBytesPerSecond, 0) || math.IsNaN(rates.ReadOperationsPerSecond) || math.IsInf(rates.ReadOperationsPerSecond, 0) || math.IsNaN(rates.WriteOperationsPerSecond) || math.IsInf(rates.WriteOperationsPerSecond, 0) || math.IsNaN(rates.BusyFraction) || math.IsInf(rates.BusyFraction, 0) {
 		return BlockRates{}
 	}
