@@ -486,3 +486,80 @@ func TestOpenGPUCounterOpensOnCPUMaskCPU(t *testing.T) {
 		}
 	}
 }
+
+// A discrete i915 registers its PMU as "i915_<dev_name>" with ':' replaced
+// by '_' and no parent device, so there is no device link (issue #40).
+func TestDiscreteI915PMUMapsByName(t *testing.T) {
+	root := t.TempDir()
+	writePMU(t, root, "i915_0000_03_00.0", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	candidates, issues := discoverGPUPMUs(root, "i915")
+	if len(issues) != 0 || len(candidates) != 1 {
+		t.Fatalf("candidates=%#v issues=%#v", candidates, issues)
+	}
+	if candidates[0].bdf != "0000:03:00.0" {
+		t.Fatalf("bdf recovered from name = %q, want 0000:03:00.0", candidates[0].bdf)
+	}
+	mapped := mapGPUPMUs([]gpuRef{{bdf: "0000:03:00.0", driver: "i915"}}, candidates)
+	if mapped[0] < 0 {
+		t.Fatalf("discrete i915 GPU 0000:03:00.0 not mapped to its PMU %q: mapped=%v", candidates[0].name, mapped)
+	}
+}
+
+func TestPMUMapsIGPUAndDGPUByNames(t *testing.T) {
+	root := t.TempDir()
+	writePMU(t, root, "i915", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	writePMU(t, root, "i915_0000_03_00.0", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	candidates, issues := discoverGPUPMUs(root, "i915")
+	if len(issues) != 0 || len(candidates) != 2 {
+		t.Fatalf("candidates=%#v issues=%#v", candidates, issues)
+	}
+	mapped := mapGPUPMUs([]gpuRef{{bdf: "0000:00:02.0", driver: "i915"}, {bdf: "0000:03:00.0", driver: "i915"}}, candidates)
+	byName := map[string]int{}
+	for i, c := range candidates {
+		byName[c.name] = i
+	}
+	if mapped[0] != byName["i915"] || mapped[1] != byName["i915_0000_03_00.0"] {
+		t.Fatalf("mapped=%v candidates=%#v", mapped, candidates)
+	}
+}
+
+func TestPMUMalformedPerDeviceNameStaysUnmapped(t *testing.T) {
+	gpus := []gpuRef{{bdf: "0000:03:00.0", driver: "i915"}}
+	pmus := []pmuCandidate{{name: "i915_bogus", driver: "i915"}}
+	if mapped := mapGPUPMUs(gpus, pmus); mapped[0] >= 0 {
+		t.Fatalf("malformed PMU name mapped: %v", mapped)
+	}
+	root := t.TempDir()
+	writePMU(t, root, "i915_bogus", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	candidates, issues := discoverGPUPMUs(root, "i915")
+	if len(issues) != 0 || len(candidates) != 1 || candidates[0].bdf != "" {
+		t.Fatalf("candidates=%#v issues=%#v", candidates, issues)
+	}
+}
+
+func TestPMUDeviceLinkStillBeatsName(t *testing.T) {
+	root := t.TempDir()
+	writePMU(t, root, "i915_0000_03_00.0", "0000:00:02.0", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	candidates, issues := discoverGPUPMUs(root, "i915")
+	if len(issues) != 0 || len(candidates) != 1 {
+		t.Fatalf("candidates=%#v issues=%#v", candidates, issues)
+	}
+	if candidates[0].bdf != "0000:00:02.0" {
+		t.Fatalf("device link must win: bdf=%q", candidates[0].bdf)
+	}
+}
+
+func TestPMUNameBDFWideDomainRoundTrips(t *testing.T) {
+	candidates, issues := func() ([]pmuCandidate, []Issue) {
+		root := t.TempDir()
+		writePMU(t, root, "i915_10000_e1_00.0", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+		return discoverGPUPMUs(root, "i915")
+	}()
+	if len(issues) != 0 || len(candidates) != 1 {
+		t.Fatalf("candidates=%#v issues=%#v", candidates, issues)
+	}
+	mapped := mapGPUPMUs([]gpuRef{{bdf: "10000:e1:00.0", driver: "i915"}}, candidates)
+	if mapped[0] < 0 {
+		t.Fatalf("5-digit domain BDF not mapped: candidates=%#v mapped=%v", candidates, mapped)
+	}
+}

@@ -1121,3 +1121,27 @@ func TestGPUSamplerDeltaBeyondReadIntervalRebaselines(t *testing.T) {
 		t.Fatalf("post-rebaseline usage = %#v, want 0.5 of the read-to-read window %v", g.Usage, secondWindow)
 	}
 }
+
+func TestGPUSamplerMapsDiscretePMUByName(t *testing.T) {
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:03:00.0", "0x56a0", nil)
+	pmuRoot := t.TempDir()
+	writePMU(t, pmuRoot, "i915_0000_03_00.0", "", map[string]string{"rcs0-busy": "config=0x0"}, map[string]string{"rcs0-busy": "ns"})
+	opener := &fakeOpener{counters: map[uint64]*fakeCounter{0x0: {values: []uint64{0, 250_000_000}}}}
+	sampler := newTestGPUSampler(root, pmuRoot, nil, failSMI(t), opener, testTimes(2))
+	if _, err := sampler.Sample(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, issue := range second.Issues {
+		if strings.Contains(issue.Err.Error(), "no i915 PMU mapped") {
+			t.Fatalf("discrete GPU not mapped to its named PMU: %#v", second.Issues)
+		}
+	}
+	if len(second.GPUs) != 1 || !second.GPUs[0].Usage.Valid {
+		t.Fatalf("second sample GPUs = %#v", second.GPUs)
+	}
+}
