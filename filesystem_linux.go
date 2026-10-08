@@ -112,25 +112,32 @@ func checkedMultiply(left, right uint64) (uint64, bool) {
 }
 
 func statfsCapacity(stat syscall.Statfs_t) (Capacity, error) {
-	if stat.Bsize <= 0 {
+	// Frsize is the fragment size the block counts are expressed in; Bsize is
+	// only the "optimal transfer" hint. Trust Frsize when the filesystem
+	// provides it, fall back to Bsize (issue #33).
+	blockSize := stat.Bsize
+	if stat.Frsize > 0 {
+		blockSize = stat.Frsize
+	}
+	if blockSize <= 0 {
 		return Capacity{}, fmt.Errorf("statfs: invalid block size")
 	}
-	blockSize := uint64(stat.Bsize)
+	size := uint64(blockSize)
 	if stat.Bfree > stat.Blocks {
 		return Capacity{}, fmt.Errorf("statfs: free blocks exceed total")
 	}
 	if stat.Bavail > stat.Blocks {
 		return Capacity{}, fmt.Errorf("statfs: available blocks exceed total")
 	}
-	total, ok := checkedMultiply(stat.Blocks, blockSize)
+	total, ok := checkedMultiply(stat.Blocks, size)
 	if !ok {
 		return Capacity{}, fmt.Errorf("statfs: total bytes overflow")
 	}
-	used, ok := checkedMultiply(stat.Blocks-stat.Bfree, blockSize)
+	used, ok := checkedMultiply(stat.Blocks-stat.Bfree, size)
 	if !ok {
 		return Capacity{}, fmt.Errorf("statfs: used bytes overflow")
 	}
-	available, ok := checkedMultiply(stat.Bavail, blockSize)
+	available, ok := checkedMultiply(stat.Bavail, size)
 	if !ok {
 		return Capacity{}, fmt.Errorf("statfs: available bytes overflow")
 	}
