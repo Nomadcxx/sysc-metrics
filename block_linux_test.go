@@ -132,3 +132,26 @@ func TestBlockRatesRejectEveryCounterRegression(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockRatesClampBusyFractionAboveOne(t *testing.T) {
+	previous := blockState{busy: 10 * time.Millisecond}
+	for _, c := range []struct {
+		name string
+		busy time.Duration
+	}{
+		{"exactly elapsed", 1100 * time.Millisecond},
+		{"over elapsed", 101 * time.Second},
+	} {
+		current := BlockDevice{ReadBytes: 20, WriteBytes: 20, ReadOperations: 20, WriteOperations: 20, Busy: c.busy}
+		got := blockRates(previous, current, time.Second)
+		if !got.Valid {
+			t.Fatalf("%s: rates invalidated by busy figure: %#v", c.name, got)
+		}
+		if got.BusyFraction != 1 {
+			t.Fatalf("%s: BusyFraction = %v, want 1", c.name, got.BusyFraction)
+		}
+		if got.ReadBytesPerSecond != 20 || got.WriteBytesPerSecond != 20 {
+			t.Fatalf("%s: byte rates dropped by clamp: %#v", c.name, got)
+		}
+	}
+}
