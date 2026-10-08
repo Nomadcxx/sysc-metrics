@@ -121,3 +121,47 @@ func TestStatfsCapacityPrefersFrsize(t *testing.T) {
 		t.Fatal("zero bsize with zero frsize must still fail")
 	}
 }
+
+func TestAutofsTriggerIsNotStatfsed(t *testing.T) {
+	mountinfo := "26 49 0:33 / /proc/sys/fs/binfmt_misc rw,relatime shared:13 - autofs systemd-1 rw,fd=43,pgrp=1,timeout=0,minproto=5,maxproto=5,direct,pipe_ino=4972\n" +
+		"40 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+	var statted []string
+	statfs := func(path string, st *syscall.Statfs_t) error {
+		statted = append(statted, path)
+		st.Bsize, st.Blocks, st.Bfree, st.Bavail = 4096, 100, 50, 50
+		return nil
+	}
+	snapshot, err := readFilesystems(strings.NewReader(mountinfo), statfs, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range statted {
+		if p == "/proc/sys/fs/binfmt_misc" {
+			t.Fatalf("statfs called on autofs trigger %q (statted=%v)", p, statted)
+		}
+	}
+	if len(snapshot.Issues) != 0 {
+		t.Fatalf("skipped autofs row must not emit issues: %#v", snapshot.Issues)
+	}
+}
+
+func TestFilesystemMountedOverAutofsTriggerStillReported(t *testing.T) {
+	mountinfo := "26 1 0:33 / /boot rw - autofs systemd-1 rw,fd=43,pgrp=1,minproto=5,maxproto=5,direct\n" +
+		"27 1 259:1 / /boot rw - vfat /dev/nvme0n1p1 rw\n"
+	var statted []string
+	statfs := func(path string, st *syscall.Statfs_t) error {
+		statted = append(statted, path)
+		st.Bsize, st.Blocks, st.Bfree, st.Bavail = 512, 100, 50, 50
+		return nil
+	}
+	snapshot, err := readFilesystems(strings.NewReader(mountinfo), statfs, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statted) != 1 || statted[0] != "/boot" {
+		t.Fatalf("statted=%v, want only the vfat row's /boot", statted)
+	}
+	if len(snapshot.Filesystems) != 1 || snapshot.Filesystems[0].Type != "vfat" {
+		t.Fatalf("filesystems=%#v, want the stacked vfat row only", snapshot.Filesystems)
+	}
+}

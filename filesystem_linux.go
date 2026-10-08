@@ -151,6 +151,12 @@ func readFilesystems(r io.Reader, statfsFunc func(string, *syscall.Statfs_t) err
 	}
 	snapshot := FilesystemSnapshot{CollectedAt: at, Filesystems: make([]Filesystem, 0, len(mounts))}
 	for _, mount := range mounts {
+		// An autofs trigger has no capacity of its own, and statfs on it
+		// fires the automount (fs/statfs.c resolves with LOOKUP_AUTOMOUNT).
+		// A filesystem mounted on top of it has its own mountinfo row.
+		if mount.Type == "autofs" {
+			continue
+		}
 		var stat syscall.Statfs_t
 		if err := statfsFunc(mount.MountPoint, &stat); err != nil {
 			snapshot.Issues = append(snapshot.Issues, Issue{Source: mount.MountPoint, Err: err})
@@ -167,6 +173,8 @@ func readFilesystems(r io.Reader, statfsFunc func(string, *syscall.Statfs_t) err
 }
 
 // ReadFilesystems returns one mounted-filesystem snapshot from Linux.
+// Autofs trigger points are not reported: statfs on a trigger fires the
+// automount, and anything mounted on top has its own mountinfo row.
 func ReadFilesystems() (FilesystemSnapshot, error) {
 	at := time.Now()
 	file, err := os.Open("/proc/self/mountinfo")
