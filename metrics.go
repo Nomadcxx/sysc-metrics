@@ -327,7 +327,7 @@ type GPUSampler struct {
 	pciIDs  []string
 	smi     func() ([]byte, error)
 	now     func() time.Time
-	open    func(pmuType, config uint64) (gpuCounter, error)
+	open    func(pmuRoot string, pmuType, config uint64) (gpuCounter, error)
 	engines map[string]*gpuPMUState
 	// sampleGen increments once per Sample. A scripted now can return one
 	// instant for every clock read in that sample; production time.Now

@@ -398,7 +398,7 @@ func TestAuditF1SyscallFlagsGiveCloseOnExec(t *testing.T) {
 }
 
 func TestAuditF1OpenGPUCounterIsCloseOnExec(t *testing.T) {
-	counter, err := openGPUCounter(1, 0) // system-wide: needs CAP_PERFMON/CAP_SYS_ADMIN
+	counter, err := openGPUCounter(t.TempDir(), 1, 0) // system-wide: needs CAP_PERFMON/CAP_SYS_ADMIN
 	if err != nil {
 		t.Skipf("openGPUCounter needs CAP_PERFMON/CAP_SYS_ADMIN: %v", err)
 	}
@@ -432,5 +432,57 @@ func TestDiscoverBusyEventsFailClosedWhenFormatUnreadable(t *testing.T) {
 	}
 	if len(issues) != 1 || !strings.HasSuffix(issues[0].Source, filepath.Join(root, "format")) {
 		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestPMUCPUMaskParsesKernelHexGroups(t *testing.T) {
+	cases := []struct {
+		body string
+		want int
+	}{
+		{"", 0},
+		{"0\n", 0},
+		{"f\n", 0},
+		{"2", 1},
+		{"4", 2},
+		{"10000", 16},
+		{"ff,0", 32},
+		{"garbage\n", 0},
+	}
+	for _, c := range cases {
+		if got := pmuCPUMask(c.body); got != c.want {
+			t.Errorf("pmuCPUMask(%q) = %d, want %d", c.body, got, c.want)
+		}
+	}
+}
+
+func TestOpenGPUCounterOpensOnCPUMaskCPU(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		mask string // empty: no cpumask file at all
+		want int
+	}{{"masked", "4\n", 2}, {"missing", "", 0}} {
+		root := t.TempDir()
+		if c.mask != "" {
+			if err := os.WriteFile(filepath.Join(root, "cpumask"), []byte(c.mask), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var gotCPU int
+		orig := perfEventOpen
+		perfEventOpen = func(_ *perfEventAttr, pid, cpu, groupFd int, _ uint64) (int, error) {
+			gotCPU = cpu
+			if pid != -1 || groupFd != -1 {
+				t.Errorf("pid=%d groupFd=%d, want -1/-1", pid, groupFd)
+			}
+			return -1, syscall.EPERM
+		}
+		t.Cleanup(func() { perfEventOpen = orig })
+		if _, err := openGPUCounter(root, 1, 0); err == nil {
+			t.Fatalf("%s: stubbed perf_event_open error was dropped", c.name)
+		}
+		if gotCPU != c.want {
+			t.Fatalf("%s: perf_event_open cpu = %d, want %d", c.name, gotCPU, c.want)
+		}
 	}
 }

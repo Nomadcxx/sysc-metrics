@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"sort"
@@ -305,12 +306,34 @@ func gpuCounterOpenArgs(pmuType, config uint64) (*perfEventAttr, uint64) {
 	}, perfFlagFDCloexec
 }
 
-// openGPUCounter opens one PMU event counter, enabled and accumulating, for
-// the owning GPUSampler. The descriptor is close-on-exec so exec'd helpers
-// such as nvidia-smi never inherit it.
-func openGPUCounter(pmuType, config uint64) (gpuCounter, error) {
+// pmuCPUMask returns the lowest-numbered CPU in a PMU sysfs cpumask file:
+// comma-separated 32-bit hex groups with the least-significant group last
+// ("2" -> CPU 1, "ff,0" -> CPU 32). Empty or unparsable input yields 0.
+// pmuRoot points at the PMU's sysfs directory; cpumask lives under it.
+func pmuCPUMask(body string) int {
+	groups := strings.Split(strings.TrimSpace(body), ",")
+	for i := len(groups) - 1; i >= 0; i-- {
+		v, err := strconv.ParseUint(strings.TrimSpace(groups[i]), 16, 32)
+		if err != nil || v == 0 {
+			continue
+		}
+		return (len(groups)-1-i)*32 + bits.TrailingZeros64(v)
+	}
+	return 0
+}
+
+// openGPUCounter opens one PMU event counter, enabled and accumulating, on a
+// CPU listed in <pmuRoot>/cpumask (issue #36: i915 is an uncore PMU and
+// rejects perf_event_open elsewhere; CPU 0 is used when no cpumask exists).
+// The descriptor is close-on-exec so exec'd helpers such as nvidia-smi never
+// inherit it.
+func openGPUCounter(pmuRoot string, pmuType, config uint64) (gpuCounter, error) {
 	attr, flags := gpuCounterOpenArgs(pmuType, config)
-	fd, err := perfEventOpen(attr, -1, 0, -1, flags)
+	cpu := 0
+	if body, err := os.ReadFile(filepath.Join(pmuRoot, "cpumask")); err == nil {
+		cpu = pmuCPUMask(string(body))
+	}
+	fd, err := perfEventOpen(attr, -1, cpu, -1, flags)
 	if err != nil {
 		return nil, fmt.Errorf("perf_event_open: %w", err)
 	}

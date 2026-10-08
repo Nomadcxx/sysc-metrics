@@ -372,7 +372,7 @@ type fakeOpener struct {
 	opened   int
 }
 
-func (o *fakeOpener) open(pmuType, config uint64) (gpuCounter, error) {
+func (o *fakeOpener) open(pmuRoot string, pmuType, config uint64) (gpuCounter, error) {
 	o.opened++
 	if err := o.failed[config]; err != nil {
 		return nil, err
@@ -999,7 +999,7 @@ func newDelayedReadSampler(t *testing.T, plan *pmuReadPlan, values []uint64) *GP
 	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
 	sampler := newTestGPUSampler(root, pmuRoot, nil, plan.smi, &fakeOpener{}, testTimes(len(values)))
 	counter := &readStretchCounter{values: values, stretch: plan.stretch}
-	sampler.open = func(pmuType, config uint64) (gpuCounter, error) {
+	sampler.open = func(pmuRoot string, pmuType, config uint64) (gpuCounter, error) {
 		if config != 0 {
 			t.Fatalf("opened unexpected PMU config 0x%x", config)
 		}

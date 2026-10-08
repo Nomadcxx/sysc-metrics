@@ -496,7 +496,7 @@ func (s *GPUSampler) sampleGPU(state *gpuPMUState, gpu *GPU, snapshot *GPUSnapsh
 		engine := &state.engines[i]
 		source := filepath.Join(state.pmu.root, "events", engine.event.name+"-busy")
 		if engine.counter == nil {
-			counter, err := s.open(state.pmu.pmuType, engine.event.config)
+			counter, err := s.open(state.pmu.root, state.pmu.pmuType, engine.event.config)
 			if err != nil {
 				snapshot.Issues = append(snapshot.Issues, Issue{Source: source, Err: err})
 				valid = false
