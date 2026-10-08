@@ -127,6 +127,16 @@ func readSupply(dir string) (supplyReading, error) {
 			}
 		}
 	}
+	// Charge-only packs expose no energy_now; derive joules from the µAh
+	// counters and voltage so EnergyJoules and the ETA below work for
+	// them too (issue #31). µAh × µV / 1e12 = Wh, × 3600 = J. SOC still
+	// aggregates on the charge_* path (chargeFromEnergy stays false).
+	if out.hasChargeFull && !out.hasEnergy {
+		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil {
+			out.energyJ = out.chargeAh * float64(voltageNow) / 1e12 * 3600
+			out.hasEnergy = true
+		}
+	}
 	if !out.hasCharge {
 		if capacity, err := readSysfsUint(filepath.Join(dir, "capacity")); err == nil {
 			out.charge = float64(capacity) / 100
@@ -161,6 +171,10 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 		chargeNowSum   float64
 		chargeFullSum  float64
 		watts          float64
+		// energyWatts is the drain of the supplies whose energy is in
+		// EnergyJoules; the ETA divides those joules by this, not by the
+		// fleet-wide watts a watts-only pack contributes (issue #31).
+		energyWatts float64
 	)
 	var nEnergy, nCapacity, nChargeFull, nWatts int
 	var sawCharging, sawDischarging, sawFull, sawUnknown bool
@@ -186,6 +200,9 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 		if s.hasWatts {
 			watts += s.watts
 			nWatts++
+			if s.hasEnergy {
+				energyWatts += s.watts
+			}
 		}
 		switch strings.ToLower(s.status) {
 		case "charging":
@@ -249,8 +266,8 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 		snap.RateWatts = watts
 		snap.RateValid = true
 	}
-	if snap.State == BatteryDischarging && snap.RateValid && snap.RateWatts > 0 && snap.EnergyJoules > 0 {
-		hours := snap.EnergyJoules / (snap.RateWatts * 3600)
+	if snap.State == BatteryDischarging && energyWatts > 0 && snap.EnergyJoules > 0 {
+		hours := snap.EnergyJoules / (energyWatts * 3600)
 		// A pathological rate (e.g. power_now=1µW) overflows Duration and
 		// wraps negative with TimeValid true; implausible ETAs stay
 		// invalid (issue #11).
