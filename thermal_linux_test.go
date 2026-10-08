@@ -112,3 +112,20 @@ func TestThermalIgnoresDeadHwmonAndFallsBackToZone(t *testing.T) {
 		t.Fatalf("dead hwmon 0 blocked the thermal_zone fallback: %#v", snap)
 	}
 }
+
+func TestThermalPrefersHotterOnHwmonTie(t *testing.T) {
+	root := t.TempDir()
+	writeHwmon(t, root, "hwmon0", "coretemp", map[string]string{
+		"temp1_label": "Package id 0", "temp1_input": "60000",
+	})
+	writeHwmon(t, root, "hwmon1", "coretemp", map[string]string{
+		"temp1_label": "Package id 0", "temp1_input": "75000",
+	})
+	snap, err := readThermal(root, filepath.Join(t.TempDir(), "none"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Valid || snap.Celsius != 75 {
+		t.Fatalf("equal-priority sensors picked %#v, want the hotter 75", snap)
+	}
+}

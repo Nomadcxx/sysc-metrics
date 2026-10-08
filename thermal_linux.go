@@ -102,7 +102,11 @@ func pickKnownHwmon(root string, issues *[]Issue) (ThermalSnapshot, bool) {
 				celsius:   celsius,
 				source:    formatHwmonSource(driver, label),
 			}
-			if !bestOK || cand.driverPri < best.driverPri || (cand.driverPri == best.driverPri && cand.sensorPri < best.sensorPri) {
+			// Full tie: the hotter sensor is the safer reported temperature
+			// (issue #32, matching the thermal-zone picker).
+			if !bestOK || cand.driverPri < best.driverPri ||
+				(cand.driverPri == best.driverPri && cand.sensorPri < best.sensorPri) ||
+				(cand.driverPri == best.driverPri && cand.sensorPri == best.sensorPri && cand.celsius > best.celsius) {
 				best, bestOK = cand, true
 			}
 		}
