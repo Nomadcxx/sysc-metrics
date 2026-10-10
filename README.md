@@ -1,8 +1,20 @@
-# sysc-metrics
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark.png">
+    <img src="assets/wordmark-light.png" alt="sysc-metrics" height="64">
+  </picture>
+</p>
 
 Read-only Linux system telemetry for Go. CPU, memory, disks, network, temperature, battery, GPU and
 processes, read straight from `/proc` and `/sys` with nothing but the standard library. It feeds the
 bar widgets and system monitor in [sysc-shell](https://github.com/Nomadcxx/sysc-shell).
+
+<p align="center">
+  <img src="assets/system-monitor.webp" alt="The sysc-shell system monitor, drawn from sysc-metrics data" width="640"><br>
+  <sub>The sysc-shell system monitor, fed by sysc-metrics (fixture data).</sub>
+</p>
+
+[Documentation site](https://nomadcxx.github.io/sysc/docs/components/sysc-metrics/) · [Features](#features) · [Usage](#usage) · [Development](#development)
 
 ## Features
 
