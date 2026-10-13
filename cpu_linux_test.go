@@ -88,7 +88,6 @@ func TestCPUUsageRejectsEveryCounterRegression(t *testing.T) {
 		{"nice", func(value *cpuTimes) { value.nice = 9 }},
 		{"system", func(value *cpuTimes) { value.system = 9 }},
 		{"idle", func(value *cpuTimes) { value.idle = 9 }},
-		{"iowait", func(value *cpuTimes) { value.iowait = 9 }},
 		{"irq", func(value *cpuTimes) { value.irq = 9 }},
 		{"softirq", func(value *cpuTimes) { value.softirq = 9 }},
 		{"steal", func(value *cpuTimes) { value.steal = 9 }},
@@ -189,5 +188,18 @@ func TestCPUSamplerNonPositiveElapsedKeepsBaseline(t *testing.T) {
 				t.Fatalf("post-invalid usage = %#v, want fraction %v", got, want)
 			}
 		})
+	}
+}
+
+func TestCPUUsageToleratesIowaitDecrease(t *testing.T) {
+	previous := cpuTimes{idle: 100, iowait: 50, user: 10}
+	current := cpuTimes{idle: 150, iowait: 40, user: 60}
+	got := cpuUsage(previous, current)
+	if !got.Valid || got.Fraction != 0.5 {
+		t.Fatalf("cpuUsage() = %#v, want valid fraction 0.5", got)
+	}
+	// A decrease in any non-iowait counter must stay invalid.
+	if cpuUsage(cpuTimes{user: 10}, cpuTimes{user: 9}).Valid {
+		t.Fatal("user regression should be invalid")
 	}
 }

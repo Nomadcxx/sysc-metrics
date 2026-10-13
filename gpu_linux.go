@@ -69,7 +69,10 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error), now t
 		if driver == "" {
 			driver = gpuUeventDriver(dev)
 		}
-		if driver == "simpledrm" {
+		switch driver {
+		case "simpledrm", "efidrm", "vesadrm":
+			// Firmware framebuffers expose a platform device with no
+			// vendor/device sysfs files; reading them raises spurious Issues.
 			continue
 		}
 		vendor, errV := readSysfsString(filepath.Join(dev, "vendor"))

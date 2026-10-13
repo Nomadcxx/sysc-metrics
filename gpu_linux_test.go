@@ -1145,3 +1145,31 @@ func TestGPUSamplerMapsDiscretePMUByName(t *testing.T) {
 		t.Fatalf("second sample GPUs = %#v", second.GPUs)
 	}
 }
+
+func TestGPUSkipsFirmwareFramebuffers(t *testing.T) {
+	root := t.TempDir()
+	writeDRMCard(t, root, "card0", "amdgpu", "0x1002", "0x67df", nil)
+	for _, tc := range []struct{ card, driver string }{{"card2", "efidrm"}, {"card3", "vesadrm"}} {
+		dev := filepath.Join(root, tc.card, "device")
+		if err := os.MkdirAll(dev, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		drv := filepath.Join(root, "drivers", tc.driver)
+		if err := os.MkdirAll(drv, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(drv, filepath.Join(dev, "driver")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap, err := readGPU(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.GPUs) != 1 || snap.GPUs[0].Driver != "amdgpu" {
+		t.Fatalf("GPUs = %#v", snap.GPUs)
+	}
+	if len(snap.Issues) != 0 {
+		t.Fatalf("Issues = %#v", snap.Issues)
+	}
+}

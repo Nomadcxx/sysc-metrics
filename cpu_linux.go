@@ -108,35 +108,37 @@ func (t cpuTimes) total() (uint64, bool) {
 	return total, true
 }
 
-func (t cpuTimes) idleTotal() (uint64, bool) {
-	if math.MaxUint64-t.idle < t.iowait {
-		return 0, false
-	}
-	return t.idle + t.iowait, true
-}
-
 func cpuUsage(previous, current cpuTimes) CPUUsage {
-	if current.user < previous.user || current.nice < previous.nice || current.system < previous.system || current.idle < previous.idle || current.iowait < previous.iowait || current.irq < previous.irq || current.softirq < previous.softirq || current.steal < previous.steal {
+	// /proc/stat documents iowait as unreliable: it can decrease on NOHZ kernels.
+	// Exclude it from the monotonic check and clamp it to a non-negative delta,
+	// the way procps/top does. Every other counter must never regress.
+	if current.user < previous.user || current.nice < previous.nice || current.system < previous.system || current.idle < previous.idle || current.irq < previous.irq || current.softirq < previous.softirq || current.steal < previous.steal {
 		return CPUUsage{}
 	}
-	previousTotal, ok := previous.total()
-	if !ok {
-		return CPUUsage{}
+	var iowaitDelta uint64
+	if current.iowait > previous.iowait {
+		iowaitDelta = current.iowait - previous.iowait
 	}
-	currentTotal, ok := current.total()
-	if !ok || currentTotal < previousTotal {
-		return CPUUsage{}
+	// Sum the per-field deltas (with the clamped iowait) rather than subtracting
+	// the totals, so a backwards iowait cannot distort the denominator.
+	deltas := [...]uint64{
+		current.user - previous.user,
+		current.nice - previous.nice,
+		current.system - previous.system,
+		current.idle - previous.idle,
+		iowaitDelta,
+		current.irq - previous.irq,
+		current.softirq - previous.softirq,
+		current.steal - previous.steal,
 	}
-	previousIdle, ok := previous.idleTotal()
-	if !ok {
-		return CPUUsage{}
+	var totalDelta uint64
+	for _, delta := range deltas {
+		if math.MaxUint64-totalDelta < delta {
+			return CPUUsage{}
+		}
+		totalDelta += delta
 	}
-	currentIdle, ok := current.idleTotal()
-	if !ok || currentIdle < previousIdle {
-		return CPUUsage{}
-	}
-	totalDelta := currentTotal - previousTotal
-	idleDelta := currentIdle - previousIdle
+	idleDelta := deltas[3] + iowaitDelta
 	if totalDelta == 0 || idleDelta > totalDelta {
 		return CPUUsage{}
 	}
