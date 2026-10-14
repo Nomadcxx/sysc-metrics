@@ -435,19 +435,23 @@ func TestDiscoverBusyEventsFailClosedWhenFormatUnreadable(t *testing.T) {
 	}
 }
 
-func TestPMUCPUMaskParsesKernelHexGroups(t *testing.T) {
+func TestPMUCPUMaskParsesKernelCPUList(t *testing.T) {
 	cases := []struct {
 		body string
 		want int
 	}{
 		{"", 0},
 		{"0\n", 0},
+		{"1\n", 1},
+		{"8\n", 8},
+		{"12\n", 12},
 		{"f\n", 0},
-		{"2", 1},
-		{"4", 2},
-		{"10000", 16},
-		{"ff,0", 32},
+		{"3-5\n", 3},
+		{"2,6\n", 2},
+		{"0-7\n", 0},
+		{"ff,0", 0},
 		{"garbage\n", 0},
+		{"-1\n", 0},
 	}
 	for _, c := range cases {
 		if got := pmuCPUMask(c.body); got != c.want {
@@ -461,7 +465,7 @@ func TestOpenGPUCounterOpensOnCPUMaskCPU(t *testing.T) {
 		name string
 		mask string // empty: no cpumask file at all
 		want int
-	}{{"masked", "4\n", 2}, {"missing", "", 0}} {
+	}{{"masked", "2\n", 2}, {"missing", "", 0}} {
 		root := t.TempDir()
 		if c.mask != "" {
 			if err := os.WriteFile(filepath.Join(root, "cpumask"), []byte(c.mask), 0o644); err != nil {

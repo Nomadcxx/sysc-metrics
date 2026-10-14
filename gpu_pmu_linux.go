@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"sort"
@@ -328,20 +327,28 @@ func gpuCounterOpenArgs(pmuType, config uint64) (*perfEventAttr, uint64) {
 	}, perfFlagFDCloexec
 }
 
-// pmuCPUMask returns the lowest-numbered CPU in a PMU sysfs cpumask file:
-// comma-separated 32-bit hex groups with the least-significant group last
-// ("2" -> CPU 1, "ff,0" -> CPU 32). Empty or unparsable input yields 0.
+// pmuCPUMask returns the lowest-numbered CPU in a PMU sysfs cpumask file.
+// The kernel writes these in CPU list format ("0", "1", "8", "3-5", "2,6")
+// via cpumap_print_to_pagebuf(true, ...), not as a hex bitmap. Empty or
+// unparsable input yields 0, which is also the fallback for a PMU that
+// publishes no cpumask.
 // pmuRoot points at the PMU's sysfs directory; cpumask lives under it.
 func pmuCPUMask(body string) int {
-	groups := strings.Split(strings.TrimSpace(body), ",")
-	for i := len(groups) - 1; i >= 0; i-- {
-		v, err := strconv.ParseUint(strings.TrimSpace(groups[i]), 16, 32)
-		if err != nil || v == 0 {
-			continue
+	lowest := -1
+	for _, group := range strings.Split(strings.TrimSpace(body), ",") {
+		low, _, _ := strings.Cut(strings.TrimSpace(group), "-")
+		cpu, err := strconv.Atoi(low)
+		if err != nil || cpu < 0 {
+			return 0
 		}
-		return (len(groups)-1-i)*32 + bits.TrailingZeros64(v)
+		if lowest < 0 || cpu < lowest {
+			lowest = cpu
+		}
 	}
-	return 0
+	if lowest < 0 {
+		return 0
+	}
+	return lowest
 }
 
 // openGPUCounter opens one PMU event counter, enabled and accumulating, on a
