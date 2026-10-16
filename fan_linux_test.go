@@ -71,17 +71,33 @@ func TestParseFanKeepsGoodFieldsWhenOneIsUnusable(t *testing.T) {
 }
 
 func TestValidFanLevel(t *testing.T) {
-	for _, level := range []string{"auto", "disengaged", "0", "3", "7"} {
+	for _, level := range []string{"auto", "disengaged", "full-speed", "0", "3", "7"} {
 		if !ValidFanLevel(level) {
 			t.Errorf("ValidFanLevel(%q) = false, want true", level)
 		}
 	}
 	// The driver takes the string verbatim, so anything outside the set has
 	// to be refused before a write, not discovered as an EIO afterwards.
-	for _, level := range []string{"", "8", "9", "-1", "AUTO", " max", "7\n", "auto ", "disengage"} {
+	for _, level := range []string{"", "8", "9", "-1", "-0", "+1", "00", "01", "AUTO", " max", "7\n", "auto ", "disengage"} {
 		if ValidFanLevel(level) {
 			t.Errorf("ValidFanLevel(%q) = true, want false", level)
 		}
+	}
+}
+
+func TestReadFanReportsPermissionErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the permission bits this test needs")
+	}
+	path := filepath.Join(t.TempDir(), "fan")
+	if err := os.WriteFile(path, []byte("status:\tenabled\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFan(path); err == nil {
+		t.Fatal("readFan() hid a permission error as absent hardware")
 	}
 }
 

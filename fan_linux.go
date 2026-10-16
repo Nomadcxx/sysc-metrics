@@ -22,6 +22,8 @@ const (
 	FanLevelAuto = "auto"
 	// FanLevelDisengaged pins the fan to full speed.
 	FanLevelDisengaged = "disengaged"
+	// FanLevelFullSpeed is the driver's alternate spelling for full speed.
+	FanLevelFullSpeed = "full-speed"
 )
 
 // maxNumericFanLevel is the highest level a modern ThinkPad exposes. Older
@@ -43,8 +45,8 @@ type FanSnapshot struct {
 	Status string
 
 	// SpeedRPM is the reported tachometer reading. SpeedValid is false when
-	// the driver cannot produce a number, which is what a laptop that has
-	// parked its fan reports; a genuine zero fan is a valid zero.
+	// the driver cannot produce a number. A parked fan may report zero, which
+	// is a valid reading rather than a failure.
 	SpeedRPM   int
 	SpeedValid bool
 
@@ -73,9 +75,9 @@ func ReadFan() (FanSnapshot, error) {
 func readFan(path string) (FanSnapshot, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		// A missing or unreadable interface is an absent feature, not a
-		// failure: the caller draws a "not supported" panel and stops.
-		if os.IsNotExist(err) || os.IsPermission(err) {
+		// A missing interface is an absent feature, not a failure: the caller
+		// draws a "not supported" panel and stops. Other I/O errors stay visible.
+		if os.IsNotExist(err) {
 			return FanSnapshot{CollectedAt: time.Now()}, nil
 		}
 		return FanSnapshot{}, fmt.Errorf("%s: %w", path, err)
@@ -138,17 +140,16 @@ func parseFan(r io.Reader, source string) (FanSnapshot, error) {
 	return snapshot, nil
 }
 
-// ValidFanLevel reports whether level is a value the IBM ACPI fan driver
-// accepts: "auto", "disengaged", or a numeric level. Callers that write to
-// the interface must check first, because the driver takes the string
-// verbatim and an unexpected level is refused.
+// ValidFanLevel reports whether level is one of the canonical values the IBM
+// ACPI fan driver accepts: "auto", "disengaged", "full-speed", or one digit
+// from 0 through 7. Callers that write to the interface must check first,
+// because the driver takes the string verbatim and refuses other spellings.
 func ValidFanLevel(level string) bool {
 	switch level {
-	case FanLevelAuto, FanLevelDisengaged:
+	case FanLevelAuto, FanLevelDisengaged, FanLevelFullSpeed:
 		return true
 	}
-	n, err := strconv.Atoi(level)
-	return err == nil && n >= 0 && n <= maxNumericFanLevel
+	return len(level) == 1 && level[0] >= '0' && level[0] <= '0'+maxNumericFanLevel
 }
 
 // FanLevelNumber returns the numeric part of a fan level. It returns -1 for

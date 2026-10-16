@@ -26,10 +26,10 @@ func TestReadLEDsReadsBacklights(t *testing.T) {
 	root := t.TempDir()
 	// The naming thinkpad_acpi uses, including the doubled colon.
 	writeLEDFixture(t, root, "tpacpi::kbd_backlight", map[string]string{
-		"brightness": "2\n", "max_brightness": "3\n",
+		"brightness": "2\n", "max_brightness": "2\n",
 	})
 	writeLEDFixture(t, root, "tpacpi::lid_logo_dot", map[string]string{
-		"brightness": "255\n", "max_brightness": "1\n", "brightness_hw_changed": "0\n",
+		"brightness": "255\n", "max_brightness": "255\n", "brightness_hw_changed": "0\n",
 	})
 
 	got, err := readLEDs(root, false)
@@ -43,15 +43,28 @@ func TestReadLEDsReadsBacklights(t *testing.T) {
 	if got.LEDs[0].Name != "tpacpi::kbd_backlight" || got.LEDs[1].Name != "tpacpi::lid_logo_dot" {
 		t.Fatalf("LED names = %v", LEDNames(got))
 	}
-	if kbd := got.LEDs[0]; kbd.Brightness != 2 || !kbd.BrightnessValid || kbd.MaxBrightness != 3 {
+	if kbd := got.LEDs[0]; kbd.Brightness != 2 || !kbd.BrightnessValid || kbd.MaxBrightness != 2 {
 		t.Fatalf("kbd backlight = %#v", kbd)
 	}
 	if kbd := got.LEDs[0]; kbd.HWChangedValid {
 		t.Fatalf("kbd backlight reported a firmware counter it does not have: %#v", kbd)
 	}
 	lid := got.LEDs[1]
-	if !lid.HWChangedValid || lid.HWChanged != 0 || lid.MaxBrightness != 1 {
+	if !lid.HWChangedValid || lid.HWChanged != 0 || lid.MaxBrightness != 255 {
 		t.Fatalf("lid logo = %#v", lid)
+	}
+}
+
+func TestReadLEDsReportsPermissionErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the permission bits this test needs")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLEDs(root, false); err == nil {
+		t.Fatal("readLEDs() hid a permission error as an empty LED class")
 	}
 }
 

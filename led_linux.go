@@ -61,7 +61,7 @@ func readLEDs(root string, probeWrite bool) (LEDSnapshot, error) {
 	snapshot := LEDSnapshot{CollectedAt: time.Now()}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		if os.IsNotExist(err) || os.IsPermission(err) {
+		if os.IsNotExist(err) {
 			return snapshot, nil
 		}
 		return LEDSnapshot{}, fmt.Errorf("%s: %w", root, err)
