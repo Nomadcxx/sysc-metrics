@@ -12,6 +12,9 @@ bar widgets and system monitor in [sysc-shell](https://github.com/Nomadcxx/sysc-
 - **Network**: byte and packet rates per interface, with error and drop counters
 - **Temperature**: one CPU package reading, from k10temp, coretemp or a thermal zone, whichever the
   machine has
+- **ThinkPad fan**: RPM, driver status and the requested cooling level, from the IBM ACPI interface
+- **LEDs**: brightness, ceiling, firmware-change counter and write access for every device in the sysfs
+  LED class, which is how the keyboard backlight and the lid logo light are exposed
 - **Battery**: charge, state, power draw and time remaining, combined across every battery and UPS
 - **GPU**: usage, temperature, name and VRAM for AMD, NVIDIA and Intel
 - **Processes**: CPU and memory per process, with identities that don't get confused by PID reuse
@@ -38,7 +41,8 @@ if err != nil {
 fmt.Printf("memory: %d of %d bytes used\n", mem.Memory.UsedBytes, mem.Memory.TotalBytes)
 ```
 
-`ReadMemory`, `ReadFilesystems`, `ReadThermal`, `ReadBattery`, `ReadUptime` and `ReadGPU` all work
+`ReadMemory`, `ReadFilesystems`, `ReadThermal`, `ReadFan`, `ReadLEDs`, `ReadBattery`, `ReadUptime` and
+`ReadGPU` all work
 this way.
 
 Rates need two readings, so CPU, disk, network, process and GPU usage come from a sampler. Call
