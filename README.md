@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/wordmark.png">
-    <img src="assets/wordmark-light.png" alt="sysc-metrics" height="64">
-  </picture>
+  <img src="assets/header.webp" alt="sysc-metrics" height="64">
 </p>
 
 Read-only Linux system telemetry for Go. CPU, memory, disks, network, temperature, battery, GPU and
@@ -10,7 +7,7 @@ processes, read straight from `/proc` and `/sys` with nothing but the standard l
 bar widgets and system monitor in [sysc-shell](https://github.com/Nomadcxx/sysc-shell).
 
 <p align="center">
-  <img src="assets/system-monitor.webp" alt="The sysc-shell system monitor, drawn from sysc-metrics data" width="640"><br>
+  <img src="assets/system-monitor.webp" alt="The sysc-shell system monitor, drawn from sysc-metrics data" width="640" loading="lazy"><br>
   <sub>The sysc-shell system monitor, fed by sysc-metrics (fixture data).</sub>
 </p>
 
