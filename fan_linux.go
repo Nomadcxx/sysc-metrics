@@ -3,7 +3,6 @@
 package metrics
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -100,8 +99,7 @@ func readFan(path string) (FanSnapshot, error) {
 // The level line only appears when the module was loaded with fan_control=1.
 func parseFan(r io.Reader, source string) (FanSnapshot, error) {
 	snapshot := FanSnapshot{CollectedAt: time.Now(), Present: true}
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	for scanner.Scan() {
 		key, value, ok := strings.Cut(scanner.Text(), ":")
 		if !ok {

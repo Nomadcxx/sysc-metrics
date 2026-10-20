@@ -3,7 +3,6 @@
 package metrics
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"math"
@@ -25,8 +24,7 @@ type blockState struct {
 }
 
 func parseDiskstats(r io.Reader) ([]BlockDevice, []Issue, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	devices := []BlockDevice{}
 	issues := []Issue{}
 	seen := make(map[blockIdentity]bool)

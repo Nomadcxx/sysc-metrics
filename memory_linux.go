@@ -15,12 +15,18 @@ import (
 
 const maxScannerToken = 1 << 20
 
+// ponytail: Start at 1 KiB for short kernel rows; Scanner grows up to maxScannerToken for long records.
+func newKernelScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 1024), maxScannerToken)
+	return scanner
+}
+
 func parseMeminfo(r io.Reader, at time.Time) (MemorySnapshot, error) {
 	const unit = uint64(1024)
 	required := map[string]uint64{}
 	seen := make(map[string]bool, 4)
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) == 0 {

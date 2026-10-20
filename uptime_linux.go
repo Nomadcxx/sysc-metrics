@@ -3,7 +3,6 @@
 package metrics
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -12,8 +11,7 @@ import (
 )
 
 func parseUptime(r io.Reader, at time.Time) (UptimeSnapshot, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	var token string
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())

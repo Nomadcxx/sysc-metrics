@@ -33,7 +33,7 @@ func TestParseProcessStatRejectsMalformedInput(t *testing.T) {
 }
 
 func TestParseProcessStatusReadsRealUIDAndResidentBytes(t *testing.T) {
-	got, err := parseProcessStatus(strings.NewReader("Name:\tworker\nUid:\t1000\t1001\t1002\t1003\nVmRSS:\t42 kB\n"))
+	got, err := parseProcessStatus(strings.NewReader("Name:\tworker\n\u00a0Uid:\t1000\t1001\t1002\t1003\n\u2003VmRSS:\t42 kB\u00a0\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +73,16 @@ func TestProcessSamplerUsesSequentialCPUAndForgetsVanishedProcesses(t *testing.T
 	}
 
 	writeProcStat(t, root, 200)
-	writeProcess(t, root, 42, "worker (copy)", 1, 30, 991, 1000, 44, []string{"worker", "--copy"})
+	writeProcess(t, root, 42, "replacement", 1, 30, 991, 1000, 44, []string{"replacement", "--second"})
 	second, err := sampler.Sample()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(second.Processes) != 1 || !second.Processes[0].CPU.Valid || second.Processes[0].CPU.Fraction != 0.2 {
 		t.Fatalf("second snapshot = %#v", second)
+	}
+	if first.Processes[0].Name != "worker (copy)" || len(first.Processes[0].Args) != 2 || first.Processes[0].Args[1] != "--copy" {
+		t.Fatalf("first snapshot changed after buffer reuse: %#v", first.Processes[0])
 	}
 
 	if err := os.RemoveAll(filepath.Join(root, "42")); err != nil {
