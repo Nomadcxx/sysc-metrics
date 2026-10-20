@@ -3,7 +3,7 @@
 package metrics
 
 import (
-	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -81,14 +82,17 @@ func parseProcessStatus(r io.Reader) (parsedProcessStatus, error) {
 	var status parsedProcessStatus
 	seenUID := false
 	seenResident := false
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+		line := bytes.TrimSpace(scanner.Bytes())
+		if !bytes.HasPrefix(line, []byte("Uid:")) && !bytes.HasPrefix(line, []byte("VmRSS:")) {
+			continue
+		}
+		fields := bytes.Fields(line)
 		if len(fields) == 0 {
 			continue
 		}
-		switch fields[0] {
+		switch string(fields[0]) {
 		case "Uid:":
 			if seenUID {
 				return parsedProcessStatus{}, fmt.Errorf("duplicate Uid field")
@@ -97,7 +101,7 @@ func parseProcessStatus(r io.Reader) (parsedProcessStatus, error) {
 			if len(fields) < 2 {
 				return parsedProcessStatus{}, fmt.Errorf("Uid: missing real UID")
 			}
-			uid, err := strconv.ParseUint(fields[1], 10, 32)
+			uid, err := strconv.ParseUint(string(fields[1]), 10, 32)
 			if err != nil {
 				return parsedProcessStatus{}, fmt.Errorf("Uid: invalid real UID: %w", err)
 			}
@@ -108,10 +112,10 @@ func parseProcessStatus(r io.Reader) (parsedProcessStatus, error) {
 				return parsedProcessStatus{}, fmt.Errorf("duplicate VmRSS field")
 			}
 			seenResident = true
-			if len(fields) != 3 || fields[2] != "kB" {
+			if len(fields) != 3 || string(fields[2]) != "kB" {
 				return parsedProcessStatus{}, fmt.Errorf("VmRSS: expected kB value")
 			}
-			residentKB, err := strconv.ParseUint(fields[1], 10, 64)
+			residentKB, err := strconv.ParseUint(string(fields[1]), 10, 64)
 			if err != nil || residentKB > math.MaxUint64/1024 {
 				return parsedProcessStatus{}, fmt.Errorf("VmRSS: invalid kB value")
 			}
@@ -132,19 +136,50 @@ func newProcessSampler(root string) *ProcessSampler {
 	return &ProcessSampler{root: root}
 }
 
-func readProcessArgs(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+func parseProcessArgs(data []byte) []string {
 	if len(data) == 0 {
-		return nil, nil
+		return nil
 	}
 	parts := strings.Split(string(data), "\x00")
 	if parts[len(parts)-1] == "" {
 		parts = parts[:len(parts)-1]
 	}
-	return parts, nil
+	return parts
+}
+
+// readProcessFile reuses buffer across proc files. data aliases nextBuffer, so
+// callers must copy any returned values that outlive the next read.
+func readProcessFile(path string, buffer []byte) (data, nextBuffer []byte, err error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, buffer, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	defer syscall.Close(fd)
+
+	if cap(buffer) == 0 {
+		buffer = make([]byte, 1024)
+	} else {
+		buffer = buffer[:cap(buffer)]
+	}
+	read := 0
+	for {
+		if read == len(buffer) {
+			next := make([]byte, len(buffer)*2)
+			copy(next, buffer[:read])
+			buffer = next
+		}
+		n, readErr := syscall.Read(fd, buffer[read:])
+		read += n
+		if errors.Is(readErr, syscall.EINTR) {
+			continue
+		}
+		if readErr != nil {
+			return nil, buffer, &os.PathError{Op: "read", Path: path, Err: readErr}
+		}
+		if n == 0 {
+			return buffer[:read], buffer, nil
+		}
+	}
 }
 
 func (s *ProcessSampler) readTotalCPUTicks() (uint64, error) {
@@ -187,8 +222,8 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		return ProcessSnapshot{}, fmt.Errorf("%s: %w", s.root, err)
 	}
 
-	snapshot := ProcessSnapshot{CollectedAt: at}
-	current := make(map[ProcessIdentity]uint64)
+	snapshot := ProcessSnapshot{CollectedAt: at, Processes: make([]Process, 0, len(entries))}
+	current := make(map[ProcessIdentity]uint64, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -198,8 +233,10 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 			continue
 		}
 		dir := filepath.Join(s.root, entry.Name())
-		statPath := filepath.Join(dir, "stat")
-		data, err := os.ReadFile(statPath)
+		// ponytail: this Linux-only walk uses fixed proc filenames, so append their slash directly.
+		statPath := dir + "/stat"
+		data, buffer, err := readProcessFile(statPath, s.readBuffer)
+		s.readBuffer = buffer
 		if err != nil {
 			if !os.IsNotExist(err) {
 				snapshot.Issues = append(snapshot.Issues, Issue{Source: statPath, Err: err})
@@ -215,13 +252,13 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		process := Process{Identity: identity, Name: stat.name, ParentPID: stat.parentPID}
 		current[identity] = stat.cpuTicks
 
-		statusPath := filepath.Join(dir, "status")
-		statusFile, err := os.Open(statusPath)
+		statusPath := dir + "/status"
+		statusData, buffer, err := readProcessFile(statusPath, s.readBuffer)
+		s.readBuffer = buffer
 		if err != nil {
 			snapshot.Issues = append(snapshot.Issues, Issue{Source: statusPath, Err: err})
 		} else {
-			status, parseErr := parseProcessStatus(statusFile)
-			_ = statusFile.Close()
+			status, parseErr := parseProcessStatus(bytes.NewReader(statusData))
 			if parseErr != nil {
 				snapshot.Issues = append(snapshot.Issues, Issue{Source: statusPath, Err: parseErr})
 			} else {
@@ -232,10 +269,13 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 			}
 		}
 
-		cmdlinePath := filepath.Join(dir, "cmdline")
-		process.Args, err = readProcessArgs(cmdlinePath)
+		cmdlinePath := dir + "/cmdline"
+		cmdlineData, buffer, err := readProcessFile(cmdlinePath, s.readBuffer)
+		s.readBuffer = buffer
 		if err != nil {
 			snapshot.Issues = append(snapshot.Issues, Issue{Source: cmdlinePath, Err: err})
+		} else {
+			process.Args = parseProcessArgs(cmdlineData)
 		}
 		snapshot.Processes = append(snapshot.Processes, process)
 	}

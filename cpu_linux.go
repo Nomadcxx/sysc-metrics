@@ -3,7 +3,6 @@
 package metrics
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"math"
@@ -38,8 +37,7 @@ func parseCPUStat(r io.Reader) (parsedCPU, error) {
 	var parsed parsedCPU
 	parsed.cores = make(map[int]cpuTimes)
 	hasAggregate := false
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) == 0 {
@@ -151,8 +149,7 @@ func cpuUsage(previous, current cpuTimes) CPUUsage {
 }
 
 func parseLoadavg(r io.Reader) (cpuLoad, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	var fields []string
 	for scanner.Scan() {
 		fields = strings.Fields(scanner.Text())
@@ -178,8 +175,7 @@ func parseLoadavg(r io.Reader) (cpuLoad, error) {
 }
 
 func parseFrequency(r io.Reader) (uint64, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	var token string
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())

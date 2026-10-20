@@ -3,7 +3,6 @@
 package metrics
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"math"
@@ -15,8 +14,7 @@ import (
 )
 
 func parseNetDev(r io.Reader) ([]NetworkInterface, []Issue, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	interfaces := []NetworkInterface{}
 	issues := []Issue{}
 	seen := make(map[string]bool)
@@ -90,8 +88,7 @@ func parseNetDevRow(line string) (string, NetworkInterface, error) {
 }
 
 func parseIfindex(r io.Reader) (uint32, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	var token string
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())

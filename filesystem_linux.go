@@ -3,7 +3,6 @@
 package metrics
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"math"
@@ -24,8 +23,7 @@ type mountInfo struct {
 }
 
 func parseMountinfo(r io.Reader) ([]mountInfo, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), maxScannerToken)
+	scanner := newKernelScanner(r)
 	mounts := []mountInfo{}
 	for scanner.Scan() {
 		line := scanner.Text()

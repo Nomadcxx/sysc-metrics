@@ -218,6 +218,7 @@ type ProcessSnapshot struct {
 // it.
 type ProcessSampler struct {
 	root          string
+	readBuffer    []byte
 	previousTotal uint64
 	previous      map[ProcessIdentity]uint64
 	hasPrevious   bool
