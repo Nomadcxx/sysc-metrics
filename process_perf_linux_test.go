@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -66,6 +67,29 @@ func TestReadProcessFileGrowsAndReusesBuffer(t *testing.T) {
 	}
 	if &buffer[0] != bufferStart {
 		t.Fatal("readProcessFile replaced a reusable buffer that had enough capacity")
+	}
+}
+
+func TestOpenProcessFileRetriesEINTR(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "status")
+	if err := os.WriteFile(path, []byte("status"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	attempts := 0
+	fd, err := openProcessFile(path, func(path string, mode int, perm uint32) (int, error) {
+		attempts++
+		if attempts == 1 {
+			return -1, syscall.EINTR
+		}
+		return syscall.Open(path, mode, perm)
+	})
+	if err != nil {
+		t.Fatalf("openProcessFile() error = %v", err)
+	}
+	defer syscall.Close(fd)
+	if attempts != 2 {
+		t.Fatalf("open attempts = %d; want 2", attempts)
 	}
 }
 

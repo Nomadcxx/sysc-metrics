@@ -150,7 +150,7 @@ func parseProcessArgs(data []byte) []string {
 // readProcessFile reuses buffer across proc files. data aliases nextBuffer, so
 // callers must copy any returned values that outlive the next read.
 func readProcessFile(path string, buffer []byte) (data, nextBuffer []byte, err error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	fd, err := openProcessFile(path, syscall.Open)
 	if err != nil {
 		return nil, buffer, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -178,6 +178,15 @@ func readProcessFile(path string, buffer []byte) (data, nextBuffer []byte, err e
 		}
 		if n == 0 {
 			return buffer[:read], buffer, nil
+		}
+	}
+}
+
+func openProcessFile(path string, open func(string, int, uint32) (int, error)) (int, error) {
+	for {
+		fd, err := open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		if !errors.Is(err, syscall.EINTR) {
+			return fd, err
 		}
 	}
 }
