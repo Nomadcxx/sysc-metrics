@@ -318,6 +318,11 @@ func ReadGPU() (GPUSnapshot, error) {
 // Close. ReadGPU cannot report Intel usage; a consumer that needs it must
 // sample here and close the sampler when its polling stops.
 //
+// On a machine with an NVIDIA GPU the sampler owns one long-lived
+// nvidia-smi child that reports the rows on a loop, so a sample reads the
+// child's output instead of forking nvidia-smi (issue #53). The child is
+// started with the first sample that needs it and ends with Close.
+//
 // Without the privilege the PMU needs, usage for a GPU still lacking it comes
 // from walking /proc for this user's /dev/dri descriptors: one readlink per
 // descriptor each sample, and only while some GPU lacks usage. Other users'
@@ -330,6 +335,18 @@ type GPUSampler struct {
 	now     func() time.Time
 	open    func(pmuRoot string, pmuType, config uint64) (gpuCounter, error)
 	engines map[string]*gpuPMUState
+	// start begins the long-lived nvidia-smi child. It is nil when the
+	// sampler must not run one, and the child is never started then.
+	start func(period time.Duration) (nvidiaProcess, error)
+	// stream is the live child, nvidiaErr the failure of the last start
+	// and nvidiaRetryAt the moment a failed child may be started again.
+	stream         *nvidiaStream
+	nvidiaErr      error
+	nvidiaRetryAt  time.Time
+	nvidiaFailures int
+	// lastSample is the instant of the last sample, so the child's loop
+	// period follows the cadence of the consumer.
+	lastSample time.Time
 	// sampleGen increments once per Sample. A scripted now can return one
 	// instant for every clock read in that sample; production time.Now
 	// ignores it.
@@ -350,5 +367,9 @@ type GPUSampler struct {
 // usage, and usage for any GPU the other paths leave empty, from the second
 // sample on (PMU counters, else DRM client fdinfo).
 func NewGPUSampler() *GPUSampler {
-	return newGPUSampler(drmRoot, pmuDevicesRoot, pciIDsPaths, nvidiaSMI)
+	sampler := newGPUSampler(drmRoot, pmuDevicesRoot, pciIDsPaths, nvidiaSMI)
+	// The sampler owns one long-lived nvidia-smi child instead of forking
+	// nvidia-smi for every sample (issue #53).
+	sampler.start = startNvidiaChild
+	return sampler
 }

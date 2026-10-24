@@ -416,18 +416,136 @@ func (s *GPUSampler) Sample() (GPUSnapshot, error) {
 	// is the gap between its own reads, stamped when readDRMClients returns;
 	// using this earlier stamp clamps a late read to 1 (issue #25).
 	collectedAt := s.now()
-	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, s.smi, collectedAt)
+	s.nvidiaErr = nil
+	var smi func() ([]byte, error)
+	if s.smi != nil {
+		smi = s.nvidiaRows
+	}
+	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, smi, collectedAt)
 	if err != nil {
 		return GPUSnapshot{}, err
 	}
+	if s.nvidiaErr != nil {
+		snapshot.Issues = append(snapshot.Issues, Issue{Source: "nvidia-smi", Err: s.nvidiaErr})
+	}
 	s.applyIntelPMU(found, &snapshot)
 	s.applyFDInfo(found, &snapshot)
+	s.lastSample = collectedAt
 	return snapshot, nil
 }
 
+// nvidiaRows returns the NVIDIA rows for one sample. The long-lived
+// nvidia-smi child serves them; a one-shot run covers a child that is gone
+// or silent, and a sampler that runs no child at all. A child that failed
+// is reported through nvidiaErr.
+func (s *GPUSampler) nvidiaRows() ([]byte, error) {
+	if s.stream == nil {
+		if s.start == nil {
+			// The sampler runs no child, so the one-shot run is the
+			// only source.
+			return s.smi()
+		}
+		if !s.now().Before(s.nvidiaRetryAt) {
+			if err := s.startNvidiaStream(); err != nil {
+				// The child could not start. The failure is reported
+				// in the shape the one-shot run reported it.
+				return nil, err
+			}
+		}
+		if s.stream == nil {
+			// The backoff holds the restart: the one-shot run
+			// covers the sample.
+			return s.smi()
+		}
+	}
+	if rows, ok := s.stream.rows(); ok {
+		return rows, nil
+	}
+	if !s.stream.stale() {
+		// The child has not reported yet. Nothing is wrong with it.
+		return nil, nil
+	}
+	// The child is gone or its output stopped moving: report it, fall
+	// back to the one-shot run and start a new child after a backoff.
+	s.nvidiaErr = s.stream.err
+	if s.nvidiaErr == nil {
+		s.nvidiaErr = fmt.Errorf("nvidia-smi: no row for %s", nvidiaStaleFactor*s.stream.period)
+	}
+	out, err := s.smi()
+	if err != nil {
+		// The one-shot run failed: that failure is the Issue, as it
+		// was before the child existed.
+		s.nvidiaErr = nil
+		return nil, err
+	}
+	s.nvidiaFailures++
+	s.nvidiaRetryAt = s.now().Add(s.nvidiaBackoff())
+	s.stopNvidiaStream()
+	return out, nil
+}
+
+// startNvidiaStream starts the long-lived child that reports the NVIDIA
+// rows on a loop.
+func (s *GPUSampler) startNvidiaStream() error {
+	period := s.nvidiaPeriod()
+	proc, err := s.start(period)
+	if err != nil {
+		s.nvidiaFailures++
+		s.nvidiaRetryAt = s.now().Add(s.nvidiaBackoff())
+		return err
+	}
+	s.stream = newNvidiaStream(proc, period, s.now)
+	s.nvidiaFailures = 0
+	return nil
+}
+
+// stopNvidiaStream ends the child and waits for it, so no process is left
+// behind.
+func (s *GPUSampler) stopNvidiaStream() {
+	if s.stream == nil {
+		return
+	}
+	s.stream.stop()
+	s.stream = nil
+}
+
+// nvidiaPeriod is the loop period of the child: the gap between the last
+// two samples, so the child reports at the cadence of its consumer instead
+// of polling faster than the consumer asks for.
+func (s *GPUSampler) nvidiaPeriod() time.Duration {
+	if s.lastSample.IsZero() {
+		return nvidiaDefaultPeriod
+	}
+	gap := s.now().Sub(s.lastSample)
+	if gap < nvidiaMinPeriod {
+		return nvidiaMinPeriod
+	}
+	if gap > nvidiaMaxPeriod {
+		return nvidiaMaxPeriod
+	}
+	return gap
+}
+
+// nvidiaBackoff is the delay before a failed child is started again. It
+// grows with the number of failures, so a missing nvidia-smi does not turn
+// into a retry storm.
+func (s *GPUSampler) nvidiaBackoff() time.Duration {
+	if s.nvidiaFailures > nvidiaMaxFailures {
+		s.nvidiaFailures = nvidiaMaxFailures
+	}
+	backoff := nvidiaDefaultPeriod << s.nvidiaFailures
+	if backoff > nvidiaMaxBackoff {
+		return nvidiaMaxBackoff
+	}
+	return backoff
+}
+
 // Close closes every open PMU counter and drops sampling state. It is
-// idempotent; sampling after Close starts from a fresh baseline.
+// idempotent; sampling after Close starts from a fresh baseline and starts
+// a new nvidia-smi child when it needs one.
 func (s *GPUSampler) Close() error {
+	s.stopNvidiaStream()
+	s.nvidiaRetryAt = time.Time{}
 	var closeErr error
 	for _, state := range s.engines {
 		if err := state.closeCounters(); err != nil && closeErr == nil {
