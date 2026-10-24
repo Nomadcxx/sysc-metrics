@@ -27,9 +27,9 @@ func processCPUTime() time.Duration {
 
 // TestGPUSamplerSampleCostsLessThanTheProcessBudget measures the CPU a
 // sample costs and keeps it under the budget the issue sets (issue #53). The
-// long-lived child is charged to the sampler only when it is reaped, so the
-// budget covers the part the sampler pays for every sample. A fork and exec
-// of nvidia-smi per sample costs far more than the budget.
+// measurement closes the sampler first so RUSAGE_CHILDREN includes the CPU
+// used by its long-lived nvidia-smi child. A fork and exec of nvidia-smi per
+// sample costs far more than the budget.
 func TestGPUSamplerSampleCostsLessThanTheProcessBudget(t *testing.T) {
 	if _, err := runNvidiaSMI(); err != nil {
 		t.Skipf("nvidia-smi is not available: %v", err)
@@ -55,6 +55,9 @@ func TestGPUSamplerSampleCostsLessThanTheProcessBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if err := sampler.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if per := (processCPUTime() - before) / 20; per > 5*time.Millisecond {
 		t.Fatalf("a sample cost %s of CPU, want at most 5ms", per)

@@ -342,6 +342,38 @@ func TestGPUSamplerFallsBackWhenTheChildExitsAfterAReport(t *testing.T) {
 	}
 }
 
+func TestGPUSamplerStopsStaleChildWhenFallbackFails(t *testing.T) {
+	clock := &fakeClock{at: time.Unix(1, 0)}
+	child := &fakeNvidiaChild{chunks: [][]byte{nvidiaStreamRows(1, nvidiaRowA)}}
+	fallbackErr := errors.New("nvidia-smi fallback failed")
+	fallbackCalls := 0
+	sampler := newGPUSampler("/nonexistent", "/nonexistent", nil, func() ([]byte, error) {
+		fallbackCalls++
+		return nil, fallbackErr
+	})
+	sampler.now = clock.now
+	sampler.start = func(time.Duration) (nvidiaProcess, error) {
+		return child, nil
+	}
+	if rows, err := sampler.nvidiaRows(); err != nil || !strings.Contains(string(rows), nvidiaRowA) {
+		t.Fatalf("initial child rows = %q, %v", rows, err)
+	}
+
+	clock.at = clock.at.Add(3 * time.Second)
+	if _, err := sampler.nvidiaRows(); !errors.Is(err, fallbackErr) {
+		t.Fatalf("stale fallback error = %v, want %v", err, fallbackErr)
+	}
+	if fallbackCalls != 1 {
+		t.Fatalf("fallback calls = %d, want 1", fallbackCalls)
+	}
+	if !child.stopped || sampler.stream != nil {
+		t.Fatal("stale child remained open after fallback failed")
+	}
+	if sampler.nvidiaRetryAt.IsZero() {
+		t.Fatal("failed fallback did not schedule a child restart backoff")
+	}
+}
+
 func TestGPUSamplerCloseStopsTheChildAndLaterSamplesStartANewOne(t *testing.T) {
 	root := t.TempDir()
 	writeNvidiaCard(t, root, "card0", "0000:08:00.0", "0x10de", "0x2684")
