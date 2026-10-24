@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	// nvidiaQuery is the row nvidia-smi prints for every GPU.
-	nvidiaQuery = "--query-gpu=pci.bus_id,utilization.gpu,temperature.gpu,memory.used,memory.total,name"
+	// nvidiaQuery prefixes each row with the number of GPUs in the report,
+	// which frames ticks even when the device set changes.
+	nvidiaQuery = "--query-gpu=count,pci.bus_id,utilization.gpu,temperature.gpu,memory.used,memory.total,name"
 	// nvidiaFormat asks for the rows without a header and without units,
 	// the shape the one-shot run read.
 	nvidiaFormat = "--format=csv,noheader,nounits"
@@ -138,9 +139,8 @@ func (c *nvidiaChild) stop() {
 }
 
 // nvidiaStream turns the output of a long-lived nvidia-smi child into the
-// newest complete tick: the rows of one report, one row per GPU. A tick is
-// never mixed with the next one, so the GPUs of a snapshot come from the
-// same report.
+// newest complete tick. The count field marks how many rows belong to each
+// report and is stripped before the rows reach the existing CSV parser.
 type nvidiaStream struct {
 	proc   nvidiaProcess
 	period time.Duration
@@ -149,16 +149,13 @@ type nvidiaStream struct {
 	// buf holds the bytes of a row that has not ended yet.
 	buf []byte
 	// pending holds the rows of the tick being filled, tick the newest
-	// complete one.
-	pending [][]byte
-	tick    [][]byte
-	// key is the bus id that starts a tick; tickLen is how many rows a
-	// tick holds, learned from the repetition of that key.
-	key     string
-	tickLen int
+	// complete one, and pendingCount is the row count for that report.
+	pending      [][]byte
+	tick         [][]byte
+	pendingCount int
 
 	started time.Time
-	lastRow time.Time
+	tickAt  time.Time
 	err     error
 }
 
@@ -171,7 +168,7 @@ func newNvidiaStream(proc nvidiaProcess, period time.Duration, now func() time.T
 // It reports false while the child has not produced a whole tick yet.
 func (s *nvidiaStream) rows() ([]byte, bool) {
 	s.drain()
-	if len(s.tick) == 0 {
+	if len(s.tick) == 0 || s.stale() {
 		return nil, false
 	}
 	return joinNvidiaRows(s.tick), true
@@ -211,34 +208,25 @@ func (s *nvidiaStream) feed(data []byte) {
 	}
 }
 
-// row adds one row to the report being framed. Every report starts with the
-// row of the first bus id, so the repetition of that bus id closes the report
-// before it and opens the next one. The size of a report is learned from
-// that repetition, so the framing needs no hint about how many GPUs there
-// are.
+// row adds one row to the report being framed. The count prefix ends a report
+// without relying on a GPU remaining first in the device list.
 func (s *nvidiaStream) row(row []byte) {
-	key := nvidiaRowKey(row)
-	s.lastRow = s.now()
-	switch {
-	case len(s.pending) == 0:
-		// The first row of a report.
-		if s.tickLen > 0 && key != s.key {
-			// The set of GPUs changed: learn the size of a report again.
-			s.tickLen = 0
-		}
-		s.pending = [][]byte{row}
-		s.key = key
-	case key == s.key:
-		// The row starts the next report, so the one being filled is
-		// complete.
+	count, data, ok := nvidiaRowCount(row)
+	if !ok {
+		s.pending = nil
+		s.pendingCount = 0
+		return
+	}
+	if count != s.pendingCount {
+		s.pending = nil
+		s.pendingCount = count
+	}
+	s.pending = append(s.pending, data)
+	if len(s.pending) == s.pendingCount {
 		s.tick = s.pending
-		s.pending = [][]byte{row}
-		if s.tickLen == 0 {
-			s.tickLen = len(s.tick)
-		}
-	default:
-		// Another row of the report being filled.
-		s.pending = append(s.pending, row)
+		s.pending = nil
+		s.pendingCount = 0
+		s.tickAt = s.now()
 	}
 }
 
@@ -252,21 +240,25 @@ func (s *nvidiaStream) stale() bool {
 	if s.err != nil {
 		return true
 	}
-	last := s.lastRow
+	last := s.tickAt
 	if last.IsZero() {
 		last = s.started
 	}
 	return s.now().Sub(last) > nvidiaStaleFactor*s.period
 }
 
-// nvidiaRowKey is the bus id a row starts with. It marks the first row of
-// every report.
-func nvidiaRowKey(row []byte) string {
-	line := string(row)
-	if i := strings.IndexByte(line, ','); i >= 0 {
-		line = line[:i]
+// nvidiaRowCount removes and parses the row count prefix emitted by
+// nvidia-smi, returning the CSV row expected by parseNvidiaCSV.
+func nvidiaRowCount(row []byte) (int, []byte, bool) {
+	i := bytes.IndexByte(row, ',')
+	if i < 0 {
+		return 0, nil, false
 	}
-	return strings.TrimSpace(line)
+	count, err := strconv.Atoi(strings.TrimSpace(string(row[:i])))
+	if err != nil || count < 1 {
+		return 0, nil, false
+	}
+	return count, bytes.TrimSpace(row[i+1:]), true
 }
 
 // joinNvidiaRows renders the rows of one report as the CSV the sampler

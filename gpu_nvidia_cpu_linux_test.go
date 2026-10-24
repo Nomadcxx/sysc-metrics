@@ -41,7 +41,7 @@ func TestGPUSamplerSampleCostsLessThanTheProcessBudget(t *testing.T) {
 		if _, err := sampler.Sample(); err != nil {
 			t.Fatal(err)
 		}
-		if sampler.stream != nil && sampler.stream.tickLen > 0 {
+		if sampler.stream != nil && len(sampler.stream.tick) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {

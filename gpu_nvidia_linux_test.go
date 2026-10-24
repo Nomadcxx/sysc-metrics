@@ -5,6 +5,7 @@ package metrics
 import (
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -48,20 +49,34 @@ const (
 	nvidiaRowB = "0000:09:00.0, 12, 45, 128, 8192, GeForce RTX 4090"
 )
 
+func nvidiaStreamRows(count int, rows ...string) []byte {
+	var out strings.Builder
+	for _, row := range rows {
+		out.WriteString(strconv.Itoa(count))
+		out.WriteString(", ")
+		out.WriteString(row)
+		out.WriteByte('\n')
+	}
+	return []byte(out.String())
+}
+
 func TestNvidiaStreamServesTheNewestCompleteReport(t *testing.T) {
 	clock := &fakeClock{at: time.Unix(0, 0)}
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(nvidiaRowA + "\n" + nvidiaRowB + "\n"),
+		nvidiaStreamRows(2, nvidiaRowA, nvidiaRowB),
 	}}
 	stream := newNvidiaStream(child, time.Second, clock.now)
 
-	if _, ok := stream.rows(); ok {
-		t.Fatal("a report was served before the child finished one")
+	rows, ok := stream.rows()
+	if !ok {
+		t.Fatal("no report was served after all GPU rows arrived")
+	}
+	if strings.Count(string(rows), "\n") != 2 {
+		t.Fatalf("report = %q, want two rows", rows)
 	}
 
-	// The child repeats the first bus id: the report holds two rows.
-	child.chunks = append(child.chunks, []byte(nvidiaRowA+"\n"+nvidiaRowB+"\n"))
-	rows, ok := stream.rows()
+	child.chunks = append(child.chunks, nvidiaStreamRows(2, nvidiaRowA, nvidiaRowB))
+	rows, ok = stream.rows()
 	if !ok {
 		t.Fatal("no report was served")
 	}
@@ -77,8 +92,8 @@ func TestNvidiaStreamServesTheNewestCompleteReport(t *testing.T) {
 func TestNvidiaStreamNeverMixesTwoReports(t *testing.T) {
 	clock := &fakeClock{at: time.Unix(0, 0)}
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(nvidiaRowA + "\n" + nvidiaRowB + "\n"),
-		[]byte("0000:08:00.0, 5, 6, 7, 8, GeForce RTX 4090\n"),
+		nvidiaStreamRows(2, nvidiaRowA, nvidiaRowB),
+		nvidiaStreamRows(2, "0000:08:00.0, 5, 6, 7, 8, GeForce RTX 4090"),
 	}}
 	stream := newNvidiaStream(child, time.Second, clock.now)
 
@@ -105,61 +120,72 @@ func TestNvidiaStreamServesTheNewestReportOfOneGPU(t *testing.T) {
 	)
 	clock := &fakeClock{at: time.Unix(0, 0)}
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(rowA + "\n" + rowB + "\n"),
+		nvidiaStreamRows(1, rowA, rowB),
 	}}
 	stream := newNvidiaStream(child, time.Second, clock.now)
 
-	// One GPU means one row per report. The first report is complete
-	// once the second row arrives.
+	// One GPU means one row per report; the stream keeps the newest row.
 	rows, ok := stream.rows()
 	if !ok {
 		t.Fatal("no report was served")
 	}
-	if !strings.Contains(string(rows), "37, 61") {
-		t.Fatalf("report = %q, want the first report", rows)
+	if !strings.Contains(string(rows), "5, 6, 7, 8") {
+		t.Fatalf("report = %q, want the newest report", rows)
 	}
 
-	// The next report of the same GPU replaces the served one.
-	child.chunks = append(child.chunks, []byte(rowC+"\n"))
+	child.chunks = append(child.chunks, nvidiaStreamRows(1, rowC))
 	rows, ok = stream.rows()
 	if !ok {
 		t.Fatal("no report was served")
 	}
-	if !strings.Contains(string(rows), "5, 6, 7, 8") {
+	if !strings.Contains(string(rows), "9, 10, 11, 12") {
 		t.Fatalf("report = %q, want the newest complete report", rows)
 	}
 }
 
-func TestNvidiaStreamRelearnsTheReportSizeWhenTheGPUsChange(t *testing.T) {
-	const rowC = "0000:0a:00.0, 9, 10, 11, 12, GeForce RTX 4090"
+func TestNvidiaStreamRelearnsTheReportSizeWhenGPUCountChanges(t *testing.T) {
 	clock := &fakeClock{at: time.Unix(0, 0)}
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(nvidiaRowA + "\n" + nvidiaRowB + "\n" + nvidiaRowA + "\n" + nvidiaRowB + "\n"),
+		nvidiaStreamRows(2, nvidiaRowA, nvidiaRowB),
+		nvidiaStreamRows(1, "0000:0a:00.0, 9, 10, 11, 12, GeForce RTX 4090"),
 	}}
 	stream := newNvidiaStream(child, time.Second, clock.now)
-	if _, ok := stream.rows(); !ok {
-		t.Fatal("no report was served")
-	}
-
-	// The second GPU is gone and a third one takes its place.
-	child.chunks = append(child.chunks, []byte(nvidiaRowA+"\n"+rowC+"\n"+nvidiaRowA+"\n"+rowC+"\n"))
 	rows, ok := stream.rows()
 	if !ok {
 		t.Fatal("no report was served")
 	}
 	text := string(rows)
-	if !strings.Contains(text, nvidiaRowA) || !strings.Contains(text, rowC) {
-		t.Fatalf("report = %q, want the rows of the new set of GPUs", text)
+	if !strings.Contains(text, "0000:0a:00.0") || strings.Contains(text, nvidiaRowA) || strings.Contains(text, nvidiaRowB) {
+		t.Fatalf("report = %q, want only the single GPU in the new report", text)
 	}
-	if strings.Contains(text, nvidiaRowB) {
-		t.Fatalf("report = %q, want no row of the GPU that is gone", text)
+}
+
+func TestNvidiaStreamHandlesTheFirstGPUChangingBetweenReports(t *testing.T) {
+	const rowC = "0000:0a:00.0, 9, 10, 11, 12, GeForce RTX 4090"
+	clock := &fakeClock{at: time.Unix(0, 0)}
+	child := &fakeNvidiaChild{chunks: [][]byte{
+		[]byte("2, " + nvidiaRowA + "\n2, " + nvidiaRowB + "\n" +
+			"2, " + nvidiaRowB + "\n2, " + rowC + "\n"),
+	}}
+	stream := newNvidiaStream(child, time.Second, clock.now)
+
+	rows, ok := stream.rows()
+	if !ok {
+		t.Fatal("no report was served")
+	}
+	text := string(rows)
+	if !strings.Contains(text, nvidiaRowB) || !strings.Contains(text, rowC) {
+		t.Fatalf("report = %q, want the rows after the first GPU changed", text)
+	}
+	if strings.Contains(text, nvidiaRowA) {
+		t.Fatalf("report = %q, want no row from the previous GPU set", text)
 	}
 }
 
 func TestNvidiaStreamKeepsARowThatArrivesInParts(t *testing.T) {
 	clock := &fakeClock{at: time.Unix(0, 0)}
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(nvidiaRowA + "\n0000:08:00"),
+		append(nvidiaStreamRows(2, nvidiaRowA), []byte("2, 0000:08:00")...),
 		[]byte(".0, 12, 45, 128, 8192, GeForce RTX 4090\n"),
 	}}
 	stream := newNvidiaStream(child, time.Second, clock.now)
@@ -204,11 +230,30 @@ func TestNvidiaStreamReportsASilentChild(t *testing.T) {
 	}
 }
 
+func TestNvidiaStreamExpiresTheLastCompleteReport(t *testing.T) {
+	clock := &fakeClock{at: time.Unix(0, 0)}
+	child := &fakeNvidiaChild{chunks: [][]byte{
+		[]byte("1, " + nvidiaRowA + "\n1, " + nvidiaRowB + "\n"),
+	}}
+	stream := newNvidiaStream(child, time.Second, clock.now)
+	if _, ok := stream.rows(); !ok {
+		t.Fatal("no report was served")
+	}
+
+	clock.at = clock.at.Add(3 * time.Second)
+	if rows, ok := stream.rows(); ok {
+		t.Fatalf("stale report %q was served", rows)
+	}
+	if !stream.stale() {
+		t.Fatal("the last complete report was not reported as stale")
+	}
+}
+
 func TestGPUSamplerReadsTheNvidiaRowsFromTheChild(t *testing.T) {
 	root := t.TempDir()
 	writeNvidiaCard(t, root, "card0", "0000:08:00.0", "0x10de", "0x2684")
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(nvidiaRowA + "\n" + nvidiaRowA + "\n"),
+		nvidiaStreamRows(1, nvidiaRowA, nvidiaRowA),
 	}}
 	sampler := newGPUSampler(root, t.TempDir(), nil, func() ([]byte, error) {
 		t.Fatal("the one-shot nvidia-smi ran while the child had rows")
@@ -266,11 +311,42 @@ func TestGPUSamplerFallsBackWhenTheChildIsGone(t *testing.T) {
 	}
 }
 
+func TestGPUSamplerFallsBackWhenTheChildExitsAfterAReport(t *testing.T) {
+	root := t.TempDir()
+	writeNvidiaCard(t, root, "card0", "0000:08:00.0", "0x10de", "0x2684")
+	child := &fakeNvidiaChild{
+		chunks: [][]byte{[]byte("1, " + nvidiaRowA + "\n1, " + nvidiaRowB + "\n")},
+		err:    io.EOF,
+	}
+	called := false
+	sampler := newGPUSampler(root, t.TempDir(), nil, func() ([]byte, error) {
+		called = true
+		return []byte(nvidiaRowA + "\n"), nil
+	})
+	sampler.start = func(period time.Duration) (nvidiaProcess, error) {
+		return child, nil
+	}
+
+	snap, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("the one-shot nvidia-smi did not cover the stale report")
+	}
+	if len(snap.Issues) != 1 || snap.Issues[0].Source != "nvidia-smi" {
+		t.Fatalf("issues = %#v", snap.Issues)
+	}
+	if !child.stopped {
+		t.Fatal("the exited child was not stopped")
+	}
+}
+
 func TestGPUSamplerCloseStopsTheChildAndLaterSamplesStartANewOne(t *testing.T) {
 	root := t.TempDir()
 	writeNvidiaCard(t, root, "card0", "0000:08:00.0", "0x10de", "0x2684")
 	child := &fakeNvidiaChild{chunks: [][]byte{
-		[]byte(nvidiaRowA + "\n" + nvidiaRowA + "\n"),
+		nvidiaStreamRows(1, nvidiaRowA, nvidiaRowA),
 	}}
 	started := 0
 	sampler := newGPUSampler(root, t.TempDir(), nil, func() ([]byte, error) {
@@ -361,7 +437,7 @@ func BenchmarkGPUSamplerNVIDIA(b *testing.B) {
 		if _, err := sampler.Sample(); err != nil {
 			b.Fatal(err)
 		}
-		if sampler.stream != nil && sampler.stream.tickLen > 0 {
+		if sampler.stream != nil && len(sampler.stream.tick) > 0 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
