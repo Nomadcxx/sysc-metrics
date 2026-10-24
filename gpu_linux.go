@@ -471,6 +471,9 @@ func (s *GPUSampler) nvidiaRows() ([]byte, error) {
 	if s.nvidiaErr == nil {
 		s.nvidiaErr = fmt.Errorf("nvidia-smi: no row for %s", nvidiaStaleFactor*s.stream.period)
 	}
+	s.nvidiaFailures++
+	s.nvidiaRetryAt = s.now().Add(s.nvidiaBackoff())
+	s.stopNvidiaStream()
 	out, err := s.smi()
 	if err != nil {
 		// The one-shot run failed: that failure is the Issue, as it
@@ -478,9 +481,6 @@ func (s *GPUSampler) nvidiaRows() ([]byte, error) {
 		s.nvidiaErr = nil
 		return nil, err
 	}
-	s.nvidiaFailures++
-	s.nvidiaRetryAt = s.now().Add(s.nvidiaBackoff())
-	s.stopNvidiaStream()
 	return out, nil
 }
 
