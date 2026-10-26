@@ -241,8 +241,27 @@ const (
 	BatteryFull
 )
 
+// BatteryDevice is one physical pack's own reading, kept alongside the
+// aggregate. Health is Capacity: the full-charge energy now available as a
+// fraction of what the pack held when new, which is what wears down.
+type BatteryDevice struct {
+	Name         string
+	Kind         string
+	State        BatteryState
+	Charge       float64 // 0..1
+	ChargeValid  bool
+	EnergyJoules float64
+	RateWatts    float64
+	RateValid    bool
+	// Health is energy_full / energy_full_design, 0..1. HealthValid is false
+	// when the pack does not report a design capacity, which many do not.
+	Health      float64
+	HealthValid bool
+}
+
 // BatterySnapshot is the aggregate battery observation. Present is false on a
-// machine with no battery; that is not an error.
+// machine with no battery; that is not an error. Devices holds the per-pack
+// readings the aggregate was built from, in sysfs read order.
 type BatterySnapshot struct {
 	CollectedAt   time.Time
 	Present       bool
@@ -254,6 +273,7 @@ type BatterySnapshot struct {
 	RateValid     bool
 	TimeRemaining time.Duration
 	TimeValid     bool
+	Devices       []BatteryDevice
 	Issues        []Issue
 }
 

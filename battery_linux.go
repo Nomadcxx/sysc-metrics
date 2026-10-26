@@ -30,12 +30,20 @@ type supplyReading struct {
 	chargeAh      float64
 	chargeFullAh  float64
 	hasChargeFull bool
-	energyJ       float64
-	hasEnergy     bool
-	energyFullJ   float64
-	hasEnergyFull bool
-	watts         float64
-	hasWatts      bool
+	// chargeFullDesignAh is charge_full_design in µAh, the health
+	// denominator for a charge_*-only pack (sysc-708).
+	chargeFullDesignAh  float64
+	hasChargeFullDesign bool
+	energyJ             float64
+	hasEnergy           bool
+	energyFullJ         float64
+	hasEnergyFull       bool
+	// energyFullDesignJ is energy_full_design in Joules: what the pack held
+	// when new, the denominator of the health ratio (sysc-708).
+	energyFullDesignJ   float64
+	hasEnergyFullDesign bool
+	watts               float64
+	hasWatts            bool
 }
 
 func readBattery(root string) (BatterySnapshot, error) {
@@ -112,6 +120,12 @@ func readSupply(dir string) (supplyReading, error) {
 			out.hasCharge = true
 		}
 	}
+	// energy_full_design is the pack's original capacity, so health survives
+	// a pack that no longer reaches its design charge (sysc-708).
+	if design, err := readSysfsUint(filepath.Join(dir, "energy_full_design")); err == nil && design > 0 {
+		out.energyFullDesignJ = float64(design) * 0.0036
+		out.hasEnergyFullDesign = true
+	}
 	// charge_* is tried whenever the energy path did not establish SOC —
 	// an earlier else-if skipped it when energy_now existed but
 	// energy_full was missing/0, despite valid µAh counters (issue #17).
@@ -124,6 +138,14 @@ func readSupply(dir string) (supplyReading, error) {
 				out.chargeFullAh = float64(chargeFull)
 				out.hasChargeFull = true
 				out.hasCharge = true
+				// The µAh design counter is the health denominator for a
+				// pack that reports charge_* instead of energy_*. Converted
+				// to Joules below, once voltage is known, so health is one
+				// ratio whichever unit the pack uses.
+				if design, err := readSysfsUint(filepath.Join(dir, "charge_full_design")); err == nil && design > 0 {
+					out.chargeFullDesignAh = float64(design)
+					out.hasChargeFullDesign = true
+				}
 			}
 		}
 	}
@@ -135,6 +157,14 @@ func readSupply(dir string) (supplyReading, error) {
 		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil {
 			out.energyJ = out.chargeAh * float64(voltageNow) / 1e12 * 3600
 			out.hasEnergy = true
+		}
+	}
+	// A charge_*-only pack's design capacity is in µAh too; convert it with
+	// the same voltage so health compares two like quantities (sysc-708).
+	if out.hasChargeFullDesign && !out.hasEnergyFullDesign {
+		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil && voltageNow > 0 {
+			out.energyFullDesignJ = out.chargeFullDesignAh * float64(voltageNow) / 1e12 * 3600
+			out.hasEnergyFullDesign = true
 		}
 	}
 	if !out.hasCharge {
@@ -162,8 +192,58 @@ func readSupply(dir string) (supplyReading, error) {
 	return out, nil
 }
 
+// deviceReading turns one supply's reading into the per-pack record. State
+// goes through the same vocabulary as the aggregate so the two cannot
+// disagree about what "Full" means.
+func deviceReading(s supplyReading) BatteryDevice {
+	device := BatteryDevice{
+		Name:         s.name,
+		Kind:         s.kind,
+		State:        supplyState(s.status),
+		EnergyJoules: s.energyJ,
+	}
+	if s.hasCharge {
+		device.Charge = min(max(s.charge, 0), 1)
+		device.ChargeValid = true
+	}
+	if s.hasWatts {
+		device.RateWatts = s.watts
+		device.RateValid = true
+	}
+	// Health is what the pack can still hold over what it held when new.
+	// Both come from the same counter family, so the ratio is dimensionless.
+	if s.hasEnergyFull && s.hasEnergyFullDesign && s.energyFullDesignJ > 0 {
+		device.Health = min(max(s.energyFullJ/s.energyFullDesignJ, 0), 1)
+		device.HealthValid = true
+	}
+	return device
+}
+
+// supplyState maps a sysfs status word to a BatteryState. "Not charging" and
+// "idle" are the steady AC state of a charge-threshold pack and count as Full
+// (issue #6), while any unrecognised word is Unknown.
+func supplyState(status string) BatteryState {
+	switch strings.ToLower(status) {
+	case "charging":
+		return BatteryCharging
+	case "discharging":
+		return BatteryDischarging
+	case "full", "not charging", "idle":
+		return BatteryFull
+	default:
+		return BatteryUnknown
+	}
+}
+
 func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue) BatterySnapshot {
 	snap := BatterySnapshot{CollectedAt: now, Present: true}
+	// Devices carries each pack's own reading; the aggregate below is
+	// derived from the same slice, so a consumer can show per-pack detail
+	// without re-reading sysfs (sysc-708).
+	snap.Devices = make([]BatteryDevice, 0, len(supplies))
+	for _, s := range supplies {
+		snap.Devices = append(snap.Devices, deviceReading(s))
+	}
 	var (
 		energyNowSum   float64
 		energyFullSum  float64
@@ -204,12 +284,12 @@ func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue)
 				energyWatts += s.watts
 			}
 		}
-		switch strings.ToLower(s.status) {
-		case "charging":
+		switch supplyState(s.status) {
+		case BatteryCharging:
 			sawCharging = true
-		case "discharging":
+		case BatteryDischarging:
 			sawDischarging = true
-		case "full", "not charging", "idle":
+		case BatteryFull:
 			// "Not charging"/"idle" is the steady AC state of a
 			// charge-threshold battery; it must not poison the Full
 			// aggregation the way an unknown word does (issue #6).

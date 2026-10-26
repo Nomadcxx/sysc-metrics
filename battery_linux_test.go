@@ -341,3 +341,82 @@ func TestBatteryMixedFleetETAUsesEnergyAlignedWatts(t *testing.T) {
 		t.Fatalf("time remaining = %v valid = %v, want 36m", snap.TimeRemaining, snap.TimeValid)
 	}
 }
+
+func TestReadBatteryReportsEachDeviceSeparatelyWithHealth(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now": "30000000", "energy_full": "60000000",
+		"energy_full_design": "80000000", "power_now": "6000000",
+	})
+	writeSupply(t, root, "BAT1", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now": "20000000", "energy_full": "40000000",
+		"energy_full_design": "40000000", "power_now": "4000000",
+	})
+	// A peripheral pack is not part of the system battery and must not
+	// appear among the devices either.
+	writeSupply(t, root, "hidpp_battery_0", map[string]string{
+		"type": "Battery", "scope": "Device", "capacity": "55",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 2 {
+		t.Fatalf("devices = %#v, want BAT0 and BAT1", snap.Devices)
+	}
+	byName := map[string]BatteryDevice{}
+	for _, device := range snap.Devices {
+		byName[device.Name] = device
+	}
+	first, ok := byName["BAT0"]
+	if !ok {
+		t.Fatalf("devices = %#v, missing BAT0", snap.Devices)
+	}
+	if !first.HealthValid || math.Abs(first.Health-0.75) > 1e-9 {
+		t.Fatalf("BAT0 health = %v valid = %v, want 0.75", first.Health, first.HealthValid)
+	}
+	if !first.ChargeValid || math.Abs(first.Charge-0.5) > 1e-9 {
+		t.Fatalf("BAT0 charge = %v valid = %v, want 0.5", first.Charge, first.ChargeValid)
+	}
+	if first.State != BatteryDischarging {
+		t.Fatalf("BAT0 state = %v, want discharging", first.State)
+	}
+	second, ok := byName["BAT1"]
+	if !ok {
+		t.Fatalf("devices = %#v, missing BAT1", snap.Devices)
+	}
+	if !second.HealthValid || math.Abs(second.Health-1) > 1e-9 {
+		t.Fatalf("BAT1 health = %v valid = %v, want 1.0", second.Health, second.HealthValid)
+	}
+	for _, device := range snap.Devices {
+		if device.Name == "hidpp_battery_0" {
+			t.Fatalf("peripheral pack reported as a system device: %#v", snap.Devices)
+		}
+	}
+	// The aggregate is unchanged by reporting devices.
+	if !snap.ChargeValid || math.Abs(snap.Charge-0.5) > 1e-9 {
+		t.Fatalf("aggregate charge = %v valid = %v, want 0.5", snap.Charge, snap.ChargeValid)
+	}
+}
+
+func TestReadBatteryHealthAbsentStaysInvalid(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Full",
+		"energy_now": "50000000", "energy_full": "50000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 1 {
+		t.Fatalf("devices = %#v, want one", snap.Devices)
+	}
+	if snap.Devices[0].HealthValid {
+		t.Fatalf("health = %v valid = true without energy_full_design", snap.Devices[0].Health)
+	}
+}
