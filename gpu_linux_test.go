@@ -336,11 +336,17 @@ func writeNvidiaCard(t *testing.T, root, card, bdf, vendor, device string) {
 
 func writeIntelCard(t *testing.T, root, card, bdf, device string, files map[string]string) {
 	t.Helper()
+	writeCard(t, root, "i915", card, bdf, device, files)
+}
+
+// writeCard lays out one /sys/class/drm card bound to the named driver.
+func writeCard(t *testing.T, root, driver, card, bdf, device string, files map[string]string) {
+	t.Helper()
 	pci := filepath.Join(root, "pci", bdf)
 	if err := os.MkdirAll(pci, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	drv := filepath.Join(root, "drivers", "i915")
+	drv := filepath.Join(root, "drivers", driver)
 	if err := os.MkdirAll(drv, 0o755); err != nil {
 		t.Fatal(err)
 	}
