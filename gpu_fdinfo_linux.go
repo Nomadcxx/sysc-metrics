@@ -16,8 +16,8 @@ const procRoot = "/proc"
 const (
 	// fdinfoMaxEmptyWalks is how many consecutive walks may find no engine
 	// data for any GPU still missing usage before the sampler stops walking.
-	// A driver that publishes no drm-engine-* time (xe's cycle counters,
-	// nouveau, virtual GPUs) would otherwise cost a /proc walk every sample
+	// A driver that publishes neither engine time nor cycle counters
+	// (nouveau, virtual GPUs) would otherwise cost a /proc walk every sample
 	// for a reading that can never come.
 	fdinfoMaxEmptyWalks = 3
 	// fdinfoRetryEvery is how many samples pass between retries once the
@@ -26,9 +26,12 @@ const (
 )
 
 // drmClient is one DRM client's cumulative busy nanoseconds per engine
-// class, and the instance count of each class that has more than one.
+// class, its busy-cycle counters where the driver publishes them (xe),
+// and the instance count of each class that has more than one.
 type drmClient struct {
 	busy     map[string]uint64
+	cycles   map[string]uint64
+	total    map[string]uint64
 	capacity map[string]uint64
 }
 
@@ -61,7 +64,7 @@ func readDRMClients(root string) drmClients {
 				continue
 			}
 			pdev, id, client := parseDRMFDInfo(filepath.Join(root, pid.Name(), "fdinfo", fd.Name()))
-			if pdev == "" || id == "" || len(client.busy) == 0 {
+			if pdev == "" || id == "" || len(client.busy) == 0 && len(client.cycles) == 0 {
 				continue
 			}
 			if out[pdev] == nil {
@@ -100,6 +103,28 @@ func parseDRMFDInfo(path string) (pdev, id string, client drmClient) {
 				client.capacity = map[string]uint64{}
 			}
 			client.capacity[strings.TrimPrefix(key, "drm-engine-capacity-")] = n
+		case strings.HasPrefix(key, "drm-cycles-"):
+			// Busy cycles for the engine. xe publishes these instead of
+			// drm-engine-* time (issue #574).
+			n, err := strconv.ParseUint(value, 10, 64)
+			if err != nil {
+				continue
+			}
+			if client.cycles == nil {
+				client.cycles = map[string]uint64{}
+			}
+			client.cycles[strings.TrimPrefix(key, "drm-cycles-")] = n
+		case strings.HasPrefix(key, "drm-total-cycles-"):
+			// A GPU-clock timestamp matching drm-cycles' update rate, so
+			// utilization needs no CPU-side interval (drm-usage-stats).
+			n, err := strconv.ParseUint(value, 10, 64)
+			if err != nil {
+				continue
+			}
+			if client.total == nil {
+				client.total = map[string]uint64{}
+			}
+			client.total[strings.TrimPrefix(key, "drm-total-cycles-")] = n
 		case strings.HasPrefix(key, "drm-engine-"):
 			// Engine time is specified in nanoseconds; any other unit is
 			// not engine time and is left out.
@@ -116,13 +141,101 @@ func parseDRMFDInfo(path string) (pdev, id string, client drmClient) {
 	return pdev, id, client
 }
 
-// fdinfoBusy is the busiest engine class's share of its capacity over
-// elapsed, summed over clients present in both samples. A class with several
-// instances accumulates up to capacity × elapsed (drm-usage-stats), so its
-// time is divided by that. A client that appeared, exited, or whose counter
-// went backwards (a reused id) has no delta for this interval and is left
-// out; with no client seen twice there is no reading at all.
+// fdinfoCycleBusy is the busiest engine class's share of its capacity from
+// the drm-cycles-*/drm-total-cycles-* counters xe publishes in place of
+// drm-engine-* time (issue #574). Both counters advance on the GPU clock,
+// so the ratio needs no CPU-side interval and is unaffected by the shell
+// sleeping between samples. drm-total-cycles is a device-wide timestamp
+// (every client of a device reports the same value), so the cycle counts
+// are summed over clients while the total is taken once.
+//
+// A class whose delta total did not advance cannot be divided; it is left
+// out rather than read as idle. The same rebase rule as engine time
+// applies: a class first seen on a steady client carries its cumulative
+// count from before we sampled it and contributes nothing (issue #9).
+func fdinfoCycleBusy(prev, cur map[string]drmClient) (float64, bool) {
+	sums := map[string]uint64{}
+	totals := map[string]uint64{}
+	capacity := map[string]uint64{}
+	seen := false
+	for id, client := range cur {
+		before, ok := prev[id]
+		if !ok {
+			continue
+		}
+		if countersRegressed(before, client) {
+			continue
+		}
+		for class, cycles := range client.cycles {
+			base, had := before.cycles[class]
+			total, hasTotal := client.total[class]
+			prevTotal, hadTotal := before.total[class]
+			// Both counters must have advanced: a class first seen
+			// mid-stream carries a cumulative count, and a GPU clock that
+			// did not move leaves no ratio to read at all.
+			if !had || !hasTotal || !hadTotal || total <= prevTotal {
+				continue
+			}
+			seen = true
+			sums[class] += cycles - base
+			totals[class] = max(totals[class], total-prevTotal)
+			capacity[class] = max(capacity[class], client.capacity[class], 1)
+		}
+	}
+	if !seen {
+		return 0, false
+	}
+	busiest := 0.0
+	for class, cycles := range sums {
+		if totals[class] == 0 {
+			continue
+		}
+		busiest = max(busiest, float64(cycles)/(float64(totals[class])*float64(capacity[class])))
+	}
+	return min(busiest, 1), true
+}
+
+// countersRegressed reports whether any cumulative counter went backwards,
+// which the usage-stats spec allows until a monotonic update catches up; a
+// reused client id reappears with small values and must not be read as a
+// huge delta.
+func countersRegressed(before, cur drmClient) bool {
+	for class, ns := range cur.busy {
+		if prevNS, had := before.busy[class]; had && ns < prevNS {
+			return true
+		}
+	}
+	for class, n := range cur.cycles {
+		if prevN, had := before.cycles[class]; had && n < prevN {
+			return true
+		}
+	}
+	for class, n := range cur.total {
+		if prevN, had := before.total[class]; had && n < prevN {
+			return true
+		}
+	}
+	return false
+}
+
+// fdinfoBusy is the busiest engine class's share of its capacity, summed
+// over clients present in both samples. Engine time (i915, amdgpu) is
+// divided by capacity × elapsed: a class with several instances accumulates
+// up to capacity × elapsed (drm-usage-stats). Cycle counters (xe) are
+// divided by their own GPU-clock total instead, so a driver publishing both
+// reads on the cycles. A client that appeared, exited, or whose counter went
+// backwards (a reused id) has no delta for this interval and is left out;
+// with no client seen twice there is no reading at all.
 func fdinfoBusy(prev, cur map[string]drmClient, elapsed time.Duration) (float64, bool) {
+	busy, ok := fdinfoEngineBusy(prev, cur, elapsed)
+	if cycles, cycleOK := fdinfoCycleBusy(prev, cur); cycleOK && (!ok || cycles > busy) {
+		// Cycles are the more accurate reading where a driver has both.
+		busy, ok = cycles, true
+	}
+	return busy, ok
+}
+
+func fdinfoEngineBusy(prev, cur map[string]drmClient, elapsed time.Duration) (float64, bool) {
 	if elapsed <= 0 {
 		return 0, false
 	}
@@ -131,16 +244,7 @@ func fdinfoBusy(prev, cur map[string]drmClient, elapsed time.Duration) (float64,
 	seen := false
 	for id, client := range cur {
 		before, ok := prev[id]
-		if !ok {
-			continue
-		}
-		backwards := false
-		for engine, ns := range client.busy {
-			if prevNS, had := before.busy[engine]; had && ns < prevNS {
-				backwards = true
-			}
-		}
-		if backwards {
+		if !ok || countersRegressed(before, client) {
 			continue
 		}
 		for engine, ns := range client.busy {

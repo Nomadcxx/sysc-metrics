@@ -40,6 +40,20 @@ func fdinfoBody(pdev, id string, render, video uint64) string {
 		"drm-engine-render:\t%d ns\ndrm-engine-copy:\t0 ns\ndrm-engine-video:\t%d ns\n", id, pdev, render, video)
 }
 
+// xeFDInfoBody is one xe client's fdinfo: cycle counters and no engine time,
+// the shape of a Lunar Lake fdinfo (drm/xe usage stats).
+func xeFDInfoBody(pdev, id string, rcs, rcsTotal, ccs, ccsTotal, vcsCapacity uint64) string {
+	body := fmt.Sprintf("pos:\t0\nflags:\t02100002\ndrm-driver:\txe\ndrm-client-id:\t%s\ndrm-pdev:\t%s\n"+
+		"drm-cycles-rcs:\t%d\ndrm-total-cycles-rcs:\t%d\n"+
+		"drm-cycles-ccs:\t%d\ndrm-total-cycles-ccs:\t%d\n",
+		id, pdev, rcs, rcsTotal, ccs, ccsTotal)
+	if vcsCapacity > 0 {
+		body += fmt.Sprintf("drm-cycles-vcs:\t0\ndrm-total-cycles-vcs:\t%d\ndrm-engine-capacity-vcs:\t%d\n",
+			ccsTotal, vcsCapacity)
+	}
+	return body
+}
+
 func TestReadDRMClientsGroupsByDeviceAndClient(t *testing.T) {
 	proc := t.TempDir()
 	// One client holding two descriptors counts once.
@@ -143,6 +157,38 @@ func TestGPUSamplerBacksOffAnFDInfoWalkThatFindsNothing(t *testing.T) {
 	}
 }
 
+// A GPU bound to xe has no drm-engine-* time at all; its usage comes from
+// the cycle counters alone, and the first sample still has no baseline.
+func TestGPUSamplerXeUsageFromCycles(t *testing.T) {
+	root := t.TempDir()
+	writeCard(t, root, "xe", "card0", "0000:03:00.0", "0x7d55", nil)
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	opener := &fakeOpener{failed: map[uint64]error{0x0: os.ErrPermission}}
+	sampler := newTestGPUSampler(root, pmuRoot, nil, failSMI(t), opener, testTimes(2))
+	proc := t.TempDir()
+	sampler.procRoot = proc
+
+	writeFDInfo(t, proc, 100, 7, xeFDInfoBody("0000:03:00.0", "3", 0, 0, 0, 0, 0))
+	first, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GPUs[0].Usage.Valid {
+		t.Fatalf("first sample has usage %#v; it has no baseline", first.GPUs[0].Usage)
+	}
+
+	// Over the GPU clock: rcs busy 250M of 1G cycles, ccs idle.
+	writeFDInfo(t, proc, 100, 7, xeFDInfoBody("0000:03:00.0", "3", 250_000_000, 1_000_000_000, 0, 1_000_000_000, 0))
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := second.GPUs[0]; !g.Usage.Valid || g.Usage.Fraction != 0.25 {
+		t.Fatalf("usage = %#v, want 0.25 from xe cycles", g.Usage)
+	}
+}
+
 func busyOnly(engines map[string]uint64) drmClient {
 	return drmClient{busy: engines}
 }
@@ -190,6 +236,120 @@ func TestFDInfoUsageDividesByEngineCapacity(t *testing.T) {
 	writeFDInfo(t, proc, 100, 7, fdinfoBody("0000:00:02.0", "1", 0, 0)+"drm-engine-capacity-video:\t2\n")
 	if got := readDRMClients(proc)["0000:00:02.0"]["1"].capacity["video"]; got != 2 {
 		t.Fatalf("parsed video capacity = %d, want 2", got)
+	}
+}
+
+// xe publishes cycle counters and no engine time, so its clients must still
+// be kept by the walk and their utilization read from the GPU clock alone.
+func TestReadDRMClientsKeepsXeCycleCounters(t *testing.T) {
+	proc := t.TempDir()
+	writeFDInfo(t, proc, 100, 7, xeFDInfoBody("0000:03:00.0", "3", 28_257_900, 7_655_183_225, 0, 7_655_183_225, 2))
+
+	client := readDRMClients(proc)["0000:03:00.0"]["3"]
+	if client.cycles["rcs"] != 28_257_900 || client.total["rcs"] != 7_655_183_225 {
+		t.Fatalf("parsed cycles = %#v", client)
+	}
+	if client.capacity["vcs"] != 2 {
+		t.Fatalf("parsed vcs capacity = %d, want 2 in %v", client.capacity["vcs"], client.capacity)
+	}
+	if len(client.busy) != 0 {
+		t.Fatalf("engine time parsed from a cycles-only fdinfo: %#v", client.busy)
+	}
+}
+
+// xe's utilization is delta cycles / delta total-cycles, per class, divided
+// by the class capacity. The total is a device-wide GPU clock, so cycles sum
+// over clients while the total is taken once.
+func TestFDInfoUsageFromXeCycles(t *testing.T) {
+	prev := map[string]drmClient{
+		"3": {cycles: map[string]uint64{"rcs": 0, "ccs": 0}, total: map[string]uint64{"rcs": 0, "ccs": 0}},
+		"4": {cycles: map[string]uint64{"rcs": 0, "ccs": 0}, total: map[string]uint64{"rcs": 0, "ccs": 0}},
+	}
+	cur := map[string]drmClient{
+		"3": {cycles: map[string]uint64{"rcs": 250_000_000, "ccs": 0}, total: map[string]uint64{"rcs": 1_000_000_000, "ccs": 1_000_000_000}},
+		"4": {cycles: map[string]uint64{"rcs": 250_000_000, "ccs": 0}, total: map[string]uint64{"rcs": 1_000_000_000, "ccs": 1_000_000_000}},
+	}
+	busy, ok := fdinfoBusy(prev, cur, time.Second)
+	if !ok || busy != 0.5 {
+		t.Fatalf("busy = %v ok = %v, want 0.5 from two clients' rcs cycles", busy, ok)
+	}
+
+	// The GPU clock needs no CPU-side interval, so a zero elapsed still
+	// yields a reading from cycles alone.
+	if busy, ok := fdinfoBusy(prev, cur, 0); !ok || busy != 0.5 {
+		t.Fatalf("busy with no elapsed = %v ok = %v, want 0.5", busy, ok)
+	}
+}
+
+// A class with several instances accumulates up to capacity × total cycles
+// (drm-usage-stats), so half-busy vcs across capacity 2 is 50%, not 100%.
+func TestFDInfoCycleUsageDividesByEngineCapacity(t *testing.T) {
+	prev := map[string]drmClient{
+		"3": {
+			cycles:   map[string]uint64{"vcs": 0},
+			total:    map[string]uint64{"vcs": 0},
+			capacity: map[string]uint64{"vcs": 2},
+		},
+	}
+	cur := map[string]drmClient{
+		"3": {
+			cycles:   map[string]uint64{"vcs": 1_000_000_000},
+			total:    map[string]uint64{"vcs": 1_000_000_000},
+			capacity: map[string]uint64{"vcs": 2},
+		},
+	}
+	busy, ok := fdinfoBusy(prev, cur, 0)
+	if !ok || busy != 0.5 {
+		t.Fatalf("busy = %v ok = %v, want 0.5 from two half-busy vcs engines", busy, ok)
+	}
+
+	over := map[string]drmClient{
+		"3": {
+			cycles:   map[string]uint64{"vcs": 5_000_000_000},
+			total:    map[string]uint64{"vcs": 1_000_000_000},
+			capacity: map[string]uint64{"vcs": 2},
+		},
+	}
+	if busy, ok := fdinfoBusy(prev, over, 0); !ok || busy != 1 {
+		t.Fatalf("busy above total = %v ok = %v, want clamped to 1", busy, ok)
+	}
+}
+
+// A GPU clock that did not advance gives no ratio to read; a class whose
+// cycles first appear mid-stream carries a cumulative count and must not be
+// read as an interval delta (issue #9's rule for cycles).
+func TestFDInfoCycleUsageNeedsTwoSamplesOfBothCounters(t *testing.T) {
+	steady := map[string]uint64{"rcs": 500_000_000}
+	if _, ok := fdinfoBusy(nil, map[string]drmClient{
+		"3": {cycles: steady, total: map[string]uint64{"rcs": 2_000_000_000}},
+	}, 0); ok {
+		t.Fatal("no previous clients produced a usage; there is no baseline")
+	}
+
+	// A class that appears mid-stream: its cumulative cycles carry over.
+	before := map[string]drmClient{
+		"3": {cycles: map[string]uint64{"rcs": 0}, total: map[string]uint64{"rcs": 0, "ccs": 100}},
+	}
+	after := map[string]drmClient{
+		"3": {
+			cycles: map[string]uint64{"rcs": 250_000_000, "ccs": 3_600_000_000_000},
+			total:  map[string]uint64{"rcs": 1_000_000_000, "ccs": 100},
+		},
+	}
+	busy, ok := fdinfoBusy(before, after, 0)
+	if !ok || busy != 0.25 {
+		t.Fatalf("busy = %v ok = %v, want 0.25 from the steady rcs delta", busy, ok)
+	}
+
+	// A frozen GPU clock: no ratio, no reading.
+	still := map[string]drmClient{
+		"3": {cycles: map[string]uint64{"rcs": 0}, total: map[string]uint64{"rcs": 100}},
+	}
+	also := map[string]drmClient{
+		"3": {cycles: map[string]uint64{"rcs": 50}, total: map[string]uint64{"rcs": 100}},
+	}
+	if _, ok := fdinfoBusy(still, also, 0); ok {
+		t.Fatal("an unmoved GPU clock produced a usage")
 	}
 }
 
