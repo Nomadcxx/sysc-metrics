@@ -1,7 +1,6 @@
 # Contributing
 
 The telemetry library: the counters the monitoring widgets read. This document says what a change
-
 has to clear and where the work is tracked.
 
 The rules of the organisation are written down in the shell repository, in `AGENTS.md`.
