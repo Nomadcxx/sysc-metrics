@@ -34,8 +34,14 @@ type supplyReading struct {
 	hasEnergy     bool
 	energyFullJ   float64
 	hasEnergyFull bool
-	watts         float64
-	hasWatts      bool
+	// energyFullDesignJ is the factory capacity, for health (issue #708).
+	energyFullDesignJ   float64
+	hasEnergyFullDesign bool
+	// chargeFullDesignAh is the factory capacity of a charge_* pack.
+	chargeFullDesignAh  float64
+	hasChargeFullDesign bool
+	watts               float64
+	hasWatts            bool
 }
 
 func readBattery(root string) (BatterySnapshot, error) {
@@ -112,6 +118,13 @@ func readSupply(dir string) (supplyReading, error) {
 			out.hasCharge = true
 		}
 	}
+	// energy_full_design is the factory capacity and is absent on some
+	// packs. It exists only for health (issue #708), so a missing or zero
+	// value leaves EnergyFullValid false rather than failing the supply.
+	if energyFullDesign, err := readSysfsUint(filepath.Join(dir, "energy_full_design")); err == nil && energyFullDesign > 0 {
+		out.energyFullDesignJ = float64(energyFullDesign) * 0.0036
+		out.hasEnergyFullDesign = true
+	}
 	// charge_* is tried whenever the energy path did not establish SOC —
 	// an earlier else-if skipped it when energy_now existed but
 	// energy_full was missing/0, despite valid µAh counters (issue #17).
@@ -127,6 +140,13 @@ func readSupply(dir string) (supplyReading, error) {
 			}
 		}
 	}
+	// charge_full_design is the charge_* pack's factory capacity. It is
+	// read at top level like energy_full_design: health must not depend
+	// on which SOC path the pack took (issue #708).
+	if chargeFullDesign, err := readSysfsUint(filepath.Join(dir, "charge_full_design")); err == nil && chargeFullDesign > 0 {
+		out.chargeFullDesignAh = float64(chargeFullDesign)
+		out.hasChargeFullDesign = true
+	}
 	// Charge-only packs expose no energy_now; derive joules from the µAh
 	// counters and voltage so EnergyJoules and the ETA below work for
 	// them too (issue #31). µAh × µV / 1e12 = Wh, × 3600 = J. SOC still
@@ -135,6 +155,21 @@ func readSupply(dir string) (supplyReading, error) {
 		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil {
 			out.energyJ = out.chargeAh * float64(voltageNow) / 1e12 * 3600
 			out.hasEnergy = true
+		}
+	}
+	// Health needs a full and a factory capacity from one unit family
+	// (issue #708). A charge-only pack derives the pair from its µAh
+	// counters and voltage_now, exactly like the joules above; the
+	// shared voltage cancels in Health = full / full_design. The
+	// energy_* pair wins whenever it is complete, and a pack that mixes
+	// families (energy_full without energy_full_design) keeps
+	// EnergyFullValid false rather than dividing µAh into joules.
+	if !out.hasEnergyFull && !out.hasEnergyFullDesign && out.hasChargeFull && out.hasChargeFullDesign {
+		if voltageNow, err := readSysfsUint(filepath.Join(dir, "voltage_now")); err == nil {
+			out.energyFullJ = out.chargeFullAh * float64(voltageNow) / 1e12 * 3600
+			out.hasEnergyFull = true
+			out.energyFullDesignJ = out.chargeFullDesignAh * float64(voltageNow) / 1e12 * 3600
+			out.hasEnergyFullDesign = true
 		}
 	}
 	if !out.hasCharge {
@@ -162,8 +197,69 @@ func readSupply(dir string) (supplyReading, error) {
 	return out, nil
 }
 
+// batteryDevice projects one supply onto the per-device catalog
+// (issue #708). Health = EnergyFull / EnergyFullDesign; the charge-only
+// pair is already converted to joules in readSupply, so the ratio and
+// units are identical on the two paths.
+func batteryDevice(s supplyReading) BatteryDevice {
+	d := BatteryDevice{Name: s.name, Kind: s.kind, Status: s.status}
+	if s.hasCharge {
+		d.Charge = s.charge
+		if d.Charge < 0 {
+			d.Charge = 0
+		}
+		if d.Charge > 1 {
+			d.Charge = 1
+		}
+		d.ChargeValid = true
+	}
+	switch strings.ToLower(s.status) {
+	case "charging":
+		d.State = BatteryCharging
+	case "discharging":
+		d.State = BatteryDischarging
+	case "full", "not charging", "idle":
+		// Steady AC state of a charge-threshold battery, as in the
+		// aggregate mapping above (issue #6).
+		d.State = BatteryFull
+	default:
+		d.State = BatteryUnknown
+	}
+	if s.hasEnergy {
+		d.EnergyJoules = s.energyJ
+	}
+	if s.hasEnergyFull {
+		d.EnergyFull = s.energyFullJ
+	}
+	if s.hasEnergyFullDesign {
+		d.EnergyFullDesign = s.energyFullDesignJ
+	}
+	if s.hasEnergyFull && s.hasEnergyFullDesign && s.energyFullDesignJ > 0 {
+		d.EnergyFullValid = true
+		d.Health = d.EnergyFull / d.EnergyFullDesign
+		if d.Health < 0 {
+			d.Health = 0
+		}
+		if d.Health > 1 {
+			d.Health = 1
+		}
+		d.HealthValid = true
+	}
+	if s.hasWatts {
+		d.RateWatts = s.watts
+		d.RateValid = true
+	}
+	return d
+}
+
 func aggregateSupplies(now time.Time, supplies []supplyReading, issues *[]Issue) BatterySnapshot {
 	snap := BatterySnapshot{CollectedAt: now, Present: true}
+	// Every system-scope battery or UPS is its own catalog entry, in
+	// sysfs name order (issue #708).
+	snap.Devices = make([]BatteryDevice, 0, len(supplies))
+	for _, s := range supplies {
+		snap.Devices = append(snap.Devices, batteryDevice(s))
+	}
 	var (
 		energyNowSum   float64
 		energyFullSum  float64
