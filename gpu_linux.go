@@ -36,11 +36,11 @@ type gpuFound struct {
 }
 
 func readGPU(drmRoot string, pciIDs []string, smi func() ([]byte, error)) (GPUSnapshot, error) {
-	snapshot, _, err := readGPUs(drmRoot, pciIDs, smi, time.Now())
+	snapshot, _, err := readGPUs(drmRoot, newPCINameCache(pciIDs), smi, time.Now())
 	return snapshot, err
 }
 
-func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error), now time.Time) (GPUSnapshot, []gpuFound, error) {
+func readGPUs(drmRoot string, pciNames *pciNameCache, smi func() ([]byte, error), now time.Time) (GPUSnapshot, []gpuFound, error) {
 	entries, err := os.ReadDir(drmRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -87,7 +87,7 @@ func readGPUs(drmRoot string, pciIDs []string, smi func() ([]byte, error), now t
 			continue
 		}
 		pci := formatPCIID(vendor, device)
-		g := GPU{PCIID: pci, Driver: driver, Name: lookupPCIName(pciIDs, vendor, device)}
+		g := GPU{PCIID: pci, Driver: driver, Name: pciNames.lookup(vendor, device)}
 		if strings.HasPrefix(pci, "10de:") {
 			hasNvidia = true
 		}
@@ -232,40 +232,119 @@ func readGPUHwmonTemp(dev string, issues *[]Issue) (float64, bool) {
 	return celsius, true
 }
 
-func lookupPCIName(paths []string, vendor, device string) string {
-	vendor = strings.ToLower(strings.TrimPrefix(vendor, "0x"))
-	device = strings.ToLower(strings.TrimPrefix(device, "0x"))
-	for _, path := range paths {
-		body, err := os.ReadFile(path)
+// fileStamp identifies one file well enough to notice a rewrite: its length
+// and modification time.
+type fileStamp struct {
+	size int64
+	mod  time.Time
+}
+
+func statFileStamp(path string) (fileStamp, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}, err
+	}
+	return fileStamp{size: info.Size(), mod: info.ModTime()}, nil
+}
+
+// pciNameCache holds the PCI product names parsed from the pci.ids tables. A
+// name that never changes is then one map lookup instead of a scan of a
+// multi-megabyte file on every sample (sysc-575). The tables are re-read only
+// when one of them changes or appears, so a package installed after the
+// sampler started is still found.
+type pciNameCache struct {
+	paths  []string
+	names  map[string]string
+	stamps map[string]fileStamp
+	stat   func(string) (fileStamp, error)
+	read   func(string) ([]byte, error)
+}
+
+func newPCINameCache(paths []string) *pciNameCache {
+	return &pciNameCache{paths: paths, stat: statFileStamp, read: os.ReadFile}
+}
+
+// lookup returns the product name of a PCI device, or "" when no table names
+// it. Vendor and device arrive as sysfs writes them, "0x8086".
+func (c *pciNameCache) lookup(vendor, device string) string {
+	if c == nil {
+		return ""
+	}
+	c.refresh()
+	return c.names[formatPCIID(vendor, device)]
+}
+
+// refresh rebuilds the table when any pci.ids file changed or appeared. An
+// unchanged file costs one stat and no read.
+func (c *pciNameCache) refresh() {
+	stamps := make(map[string]fileStamp, len(c.paths))
+	for _, path := range c.paths {
+		if stamp, err := c.stat(path); err == nil {
+			stamps[path] = stamp
+		}
+	}
+	if sameFileStamps(stamps, c.stamps) {
+		return
+	}
+	names := make(map[string]string)
+	for _, path := range c.paths {
+		body, err := c.read(path)
 		if err != nil {
 			continue
 		}
-		if name := parsePCIName(string(body), vendor, device); name != "" {
-			return name
+		for key, name := range parsePCINames(string(body)) {
+			// The first table that names a device wins, as the
+			// per-device lookup did when it stopped at the first hit.
+			if _, ok := names[key]; !ok {
+				names[key] = name
+			}
 		}
 	}
-	return ""
+	c.names, c.stamps = names, stamps
 }
 
-func parsePCIName(ids, vendor, device string) string {
-	inVendor := false
+func sameFileStamps(a, b map[string]fileStamp) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for path, stamp := range a {
+		if b[path] != stamp {
+			return false
+		}
+	}
+	return true
+}
+
+// parsePCINames parses a pci.ids table into product names keyed by
+// "vendor:device", both ids lowercase as sysfs prints them. A device the
+// table does not name has no entry.
+func parsePCINames(ids string) map[string]string {
+	names := make(map[string]string)
+	vendor := ""
 	for _, line := range strings.Split(ids, "\n") {
 		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
 			continue
 		}
 		if !strings.HasPrefix(line, "\t") {
-			inVendor = strings.HasPrefix(strings.ToLower(line), vendor)
+			vendor = ""
+			if fields := strings.Fields(line); len(fields) > 0 {
+				vendor = strings.ToLower(fields[0])
+			}
 			continue
 		}
-		if !inVendor || strings.HasPrefix(line, "\t\t") {
+		if vendor == "" || strings.HasPrefix(line, "\t\t") {
 			continue
 		}
 		fields := strings.SplitN(strings.TrimPrefix(line, "\t"), " ", 2)
-		if len(fields) >= 2 && strings.ToLower(fields[0]) == device {
-			return strings.TrimSpace(fields[1])
+		if len(fields) < 2 {
+			continue
+		}
+		key := vendor + ":" + strings.ToLower(fields[0])
+		if _, ok := names[key]; !ok {
+			names[key] = strings.TrimSpace(fields[1])
 		}
 	}
-	return ""
+	return names
 }
 
 func applyNvidiaCSV(found []gpuFound, out []byte) {
@@ -387,6 +466,12 @@ type gpuEngineState struct {
 	value    uint64
 	hasValue bool
 	readAt   time.Time // sampler clock when this counter was last read
+	// openErr is the failure that left this counter closed, and
+	// openRetryAt the moment another attempt is due. A failure that cannot
+	// clear on its own defers the attempt (sysc-575); the error is still
+	// reported every sample so the issue does not vanish while it waits.
+	openErr     error
+	openRetryAt time.Time
 }
 
 type gpuPMUState struct {
@@ -398,7 +483,7 @@ func newGPUSampler(drmRoot, pmuRoot string, pciIDs []string, smi func() ([]byte,
 	return &GPUSampler{
 		drmRoot:  drmRoot,
 		pmuRoot:  pmuRoot,
-		pciIDs:   pciIDs,
+		pciNames: newPCINameCache(pciIDs),
 		smi:      smi,
 		now:      time.Now,
 		open:     openGPUCounter,
@@ -421,7 +506,7 @@ func (s *GPUSampler) Sample() (GPUSnapshot, error) {
 	if s.smi != nil {
 		smi = s.nvidiaRows
 	}
-	snapshot, found, err := readGPUs(s.drmRoot, s.pciIDs, smi, collectedAt)
+	snapshot, found, err := readGPUs(s.drmRoot, s.pciNames, smi, collectedAt)
 	if err != nil {
 		return GPUSnapshot{}, err
 	}
@@ -632,14 +717,29 @@ func (s *GPUSampler) sampleGPU(state *gpuPMUState, gpu *GPU, snapshot *GPUSnapsh
 		engine := &state.engines[i]
 		source := filepath.Join(state.pmu.root, "events", engine.event.name+"-busy")
 		if engine.counter == nil {
+			now := s.now()
+			if engine.openErr != nil && now.Before(engine.openRetryAt) {
+				// The failure will not clear on its own and the next
+				// attempt is not due yet. Report it again rather than
+				// making another syscall that will be denied (sysc-575).
+				snapshot.Issues = append(snapshot.Issues, Issue{Source: source, Err: engine.openErr})
+				valid = false
+				continue
+			}
 			counter, err := s.open(state.pmu.root, state.pmu.pmuType, engine.event.config)
 			if err != nil {
+				engine.openErr = err
+				if errors.Is(err, os.ErrPermission) {
+					engine.openRetryAt = now.Add(pmuOpenRetry)
+				}
 				snapshot.Issues = append(snapshot.Issues, Issue{Source: source, Err: err})
 				valid = false
 				continue
 			}
 			engine.counter = counter
 			engine.hasValue = false
+			engine.openErr = nil
+			engine.openRetryAt = time.Time{}
 		}
 		value, err := engine.counter.read()
 		if err != nil {

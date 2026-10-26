@@ -328,13 +328,13 @@ func ReadGPU() (GPUSnapshot, error) {
 // descriptor each sample, and only while some GPU lacks usage. Other users'
 // clients are invisible to that walk, so usage can stay invalid.
 type GPUSampler struct {
-	drmRoot string
-	pmuRoot string
-	pciIDs  []string
-	smi     func() ([]byte, error)
-	now     func() time.Time
-	open    func(pmuRoot string, pmuType, config uint64) (gpuCounter, error)
-	engines map[string]*gpuPMUState
+	drmRoot  string
+	pmuRoot  string
+	pciNames *pciNameCache
+	smi      func() ([]byte, error)
+	now      func() time.Time
+	open     func(pmuRoot string, pmuType, config uint64) (gpuCounter, error)
+	engines  map[string]*gpuPMUState
 	// start begins the long-lived nvidia-smi child. It is nil when the
 	// sampler must not run one, and the child is never started then.
 	start func(period time.Duration) (nvidiaProcess, error)
