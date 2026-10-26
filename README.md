@@ -2,18 +2,16 @@
   <img src="assets/header.webp" alt="sysc-metrics" height="64">
 </p>
 
-Read-only Linux system telemetry for Go. CPU, memory, disks, network, temperature, battery, GPU and
-processes, read straight from `/proc` and `/sys` with nothing but the standard library. It feeds the
-bar widgets and system monitor in [sysc-shell](https://github.com/Nomadcxx/sysc-shell).
+Read-only system telemetry for Go. Linux collectors read CPU, memory, disks, network, sensors, GPU and processes from `/proc` and `/sys`. FreeBSD provides CPU, load, RAM and swap readings. The library uses the standard library and feeds [sysc-shell](https://github.com/Nomadcxx/sysc-shell) and [sysc-greet](https://github.com/Nomadcxx/sysc-greet).
 
 <p align="center">
   <img src="assets/system-monitor.webp" alt="The sysc-shell system monitor, drawn from sysc-metrics data" width="640" loading="lazy"><br>
   <sub>The sysc-shell system monitor, fed by sysc-metrics (fixture data).</sub>
 </p>
 
-[Documentation site](https://nomadcxx.github.io/sysc/docs/components/sysc-metrics/) · [Features](#features) · [Usage](#usage) · [Development](#development)
+[Documentation site](https://nomadcxx.github.io/sysc/docs/components/sysc-metrics/) · [Features](#linux-features) · [Usage](#usage) · [Development](#development)
 
-## Features
+## Linux features
 
 - **CPU**: total and per-core usage, per-core frequency, and load averages
 - **Memory**: RAM and swap
@@ -28,15 +26,23 @@ bar widgets and system monitor in [sysc-shell](https://github.com/Nomadcxx/sysc-
 - **GPU**: usage, temperature, name and VRAM for AMD, NVIDIA and Intel
 - **Processes**: CPU and memory per process, with identities that don't get confused by PID reuse
 - **Uptime**
-- **Small**: Linux only, standard library only, and it never starts a goroutine
+- **Small**: standard library only, with no background polling
 
 ## Installation
 
-**Requires:** Go 1.26+ on Linux.
+**Requires:** Go 1.26+ on Linux or FreeBSD.
 
 ```bash
 go get github.com/Nomadcxx/sysc-metrics
 ```
+
+## FreeBSD
+
+`NewCPUSampler` reports total and per-core utilization and load averages. CPU frequency fields remain invalid. `ReadMemory` reports managed RAM, with free and inactive pages counted as available, plus swap usage from `swapinfo`. RAM availability follows FreeBSD page accounting.
+
+The native backend runs `/sbin/sysctl` and `/usr/sbin/swapinfo` with a two-second timeout per command and a fixed C locale. Both tools ship with FreeBSD; collection works without root.
+
+`ReadGPU` and `GPUSampler.Sample` return an error wrapping `errors.ErrUnsupported`. The other readers and samplers remain Linux-only.
 
 ## Usage
 
