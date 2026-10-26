@@ -292,6 +292,13 @@ type gpuCounter interface {
 
 const perfFlagFDCloexec = 1 << 3
 
+// pmuOpenRetry is how long a counter left closed by a privilege failure waits
+// before the next perf_event_open attempt. The failure is reported on every
+// sample in the meantime; only the syscall is deferred, because a denied open
+// is retried on every sample otherwise (sysc-575). A minute keeps a change to
+// kernel.perf_event_paranoid noticed promptly.
+const pmuOpenRetry = time.Minute
+
 // perfEventAttr mirrors the ABI-0 perf_event_attr layout (64 bytes).
 type perfEventAttr struct {
 	Type         uint32

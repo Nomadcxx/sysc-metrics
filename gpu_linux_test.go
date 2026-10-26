@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -335,11 +336,17 @@ func writeNvidiaCard(t *testing.T, root, card, bdf, vendor, device string) {
 
 func writeIntelCard(t *testing.T, root, card, bdf, device string, files map[string]string) {
 	t.Helper()
+	writeCard(t, root, "i915", card, bdf, device, files)
+}
+
+// writeCard lays out one /sys/class/drm card bound to the named driver.
+func writeCard(t *testing.T, root, driver, card, bdf, device string, files map[string]string) {
+	t.Helper()
 	pci := filepath.Join(root, "pci", bdf)
 	if err := os.MkdirAll(pci, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	drv := filepath.Join(root, "drivers", "i915")
+	drv := filepath.Join(root, "drivers", driver)
 	if err := os.MkdirAll(drv, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1143,6 +1150,185 @@ func TestGPUSamplerMapsDiscretePMUByName(t *testing.T) {
 	}
 	if len(second.GPUs) != 1 || !second.GPUs[0].Usage.Valid {
 		t.Fatalf("second sample GPUs = %#v", second.GPUs)
+	}
+}
+
+func TestPCINameCacheReadsTableOnce(t *testing.T) {
+	ids := filepath.Join(t.TempDir(), "pci.ids")
+	if err := os.WriteFile(ids, []byte("8086  Intel Corporation\n\t5917  UHD Graphics 620\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := newPCINameCache([]string{ids})
+	reads, stats := 0, 0
+	cache.read = func(path string) ([]byte, error) {
+		reads++
+		return os.ReadFile(path)
+	}
+	cache.stat = func(path string) (fileStamp, error) {
+		stats++
+		return statFileStamp(path)
+	}
+	for i := 0; i < 3; i++ {
+		if name := cache.lookup("0x8086", "0x5917"); name != "UHD Graphics 620" {
+			t.Fatalf("lookup %d = %q", i, name)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("pci.ids reads = %d, want 1", reads)
+	}
+	if stats != 3 {
+		t.Fatalf("pci.ids stats = %d, want 3", stats)
+	}
+}
+
+func TestPCINameCacheReloadsWhenTableChanges(t *testing.T) {
+	ids := filepath.Join(t.TempDir(), "pci.ids")
+	if err := os.WriteFile(ids, []byte("8086  Intel Corporation\n\t5917  UHD Graphics 620\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := newPCINameCache([]string{ids})
+	if name := cache.lookup("0x8086", "0x5917"); name != "UHD Graphics 620" {
+		t.Fatalf("first name = %q", name)
+	}
+	// A rewrite changes the file length, so the stamp differs without
+	// depending on the filesystem clock.
+	if err := os.WriteFile(ids, []byte("8086  Intel Corporation\n\t5917  UHD Graphics 620 (refreshed)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if name := cache.lookup("0x8086", "0x5917"); name != "UHD Graphics 620 (refreshed)" {
+		t.Fatalf("name after the rewrite = %q", name)
+	}
+}
+
+func TestPCINameCacheFindsTableInstalledLater(t *testing.T) {
+	ids := filepath.Join(t.TempDir(), "pci.ids")
+	cache := newPCINameCache([]string{ids})
+	if name := cache.lookup("0x8086", "0x5917"); name != "" {
+		t.Fatalf("name with no table = %q", name)
+	}
+	if err := os.WriteFile(ids, []byte("8086  Intel Corporation\n\t5917  UHD Graphics 620\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if name := cache.lookup("0x8086", "0x5917"); name != "UHD Graphics 620" {
+		t.Fatalf("name after the table appeared = %q", name)
+	}
+}
+
+func TestPCINameCacheKeepsTheFirstPathName(t *testing.T) {
+	dir := t.TempDir()
+	first, second := filepath.Join(dir, "first.ids"), filepath.Join(dir, "second.ids")
+	for path, body := range map[string]string{
+		first:  "8086  Intel Corporation\n\t5917  UHD Graphics 620\n",
+		second: "8086  Intel Corporation\n\t5917  UHD Graphics 620 (second table)\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := newPCINameCache([]string{first, second})
+	if name := cache.lookup("0x8086", "0x5917"); name != "UHD Graphics 620" {
+		t.Fatalf("name = %q, want the first table's", name)
+	}
+}
+
+func TestGPUSamplerCachesPCINamesAcrossSamples(t *testing.T) {
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	ids := filepath.Join(t.TempDir(), "pci.ids")
+	if err := os.WriteFile(ids, []byte("8086  Intel Corporation\n\t3ea0  UHD Graphics 620\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opener := &fakeOpener{counters: map[uint64]*fakeCounter{
+		0x0: {values: []uint64{0, 250_000_000}},
+	}}
+	sampler := newTestGPUSampler(root, pmuRoot, []string{ids}, failSMI(t), opener, testTimes(2))
+	reads := 0
+	sampler.pciNames.read = func(path string) ([]byte, error) {
+		reads++
+		return os.ReadFile(path)
+	}
+	for i := 0; i < 2; i++ {
+		snapshot, err := sampler.Sample()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name := snapshot.GPUs[0].Name; name != "UHD Graphics 620" {
+			t.Fatalf("sample %d name = %q", i, name)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("pci.ids reads over 2 samples = %d, want 1", reads)
+	}
+}
+
+func TestGPUSamplerDeniedCounterIsNotReopenedEverySample(t *testing.T) {
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	openErr := fmt.Errorf("perf_event_open: %w", syscall.EACCES)
+	opener := &fakeOpener{failed: map[uint64]error{0x0: openErr}}
+	sampler := newTestGPUSampler(root, pmuRoot, nil, nil, opener, testTimes(3))
+	for i := 0; i < 3; i++ {
+		snapshot, err := sampler.Sample()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.GPUs[0].Usage.Valid {
+			t.Fatalf("sample %d usage = %#v", i, snapshot.GPUs[0].Usage)
+		}
+		found := false
+		for _, issue := range snapshot.Issues {
+			if errors.Is(issue, openErr) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("sample %d issues = %#v", i, snapshot.Issues)
+		}
+	}
+	if opener.opened != 1 {
+		t.Fatalf("perf_event_open attempts = %d, want 1", opener.opened)
+	}
+}
+
+func TestGPUSamplerDeniedCounterIsRetriedAfterTheBackoff(t *testing.T) {
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	openErr := fmt.Errorf("perf_event_open: %w", syscall.EPERM)
+	opener := &fakeOpener{failed: map[uint64]error{0x0: openErr}}
+	base := time.Unix(1_700_000_000, 0)
+	times := []time.Time{base, base.Add(pmuOpenRetry + time.Second)}
+	sampler := newTestGPUSampler(root, pmuRoot, nil, nil, opener, times)
+	for range times {
+		if _, err := sampler.Sample(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opener.opened != 2 {
+		t.Fatalf("perf_event_open attempts = %d, want 2", opener.opened)
+	}
+}
+
+func TestGPUSamplerOtherOpenFailureIsRetriedEverySample(t *testing.T) {
+	root := t.TempDir()
+	writeIntelCard(t, root, "card0", "0000:00:02.0", "0x3ea0", nil)
+	pmuRoot := t.TempDir()
+	writeIntelPMUFixture(t, pmuRoot, map[string]string{"rcs0-busy": "config=0x0"})
+	openErr := errors.New("perf_event_open: no such event")
+	opener := &fakeOpener{failed: map[uint64]error{0x0: openErr}}
+	sampler := newTestGPUSampler(root, pmuRoot, nil, nil, opener, testTimes(3))
+	for i := 0; i < 3; i++ {
+		if _, err := sampler.Sample(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opener.opened != 3 {
+		t.Fatalf("perf_event_open attempts = %d, want 3", opener.opened)
 	}
 }
 

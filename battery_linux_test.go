@@ -341,3 +341,177 @@ func TestBatteryMixedFleetETAUsesEnergyAlignedWatts(t *testing.T) {
 		t.Fatalf("time remaining = %v valid = %v, want 36m", snap.TimeRemaining, snap.TimeValid)
 	}
 }
+
+func TestReadBatteryReportsEachDeviceSeparately(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now": "40000000", "energy_full": "80000000",
+		"power_now": "20000000",
+	})
+	writeSupply(t, root, "BAT1", map[string]string{
+		"type": "Battery", "status": "Charging", "capacity": "40",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 2 {
+		t.Fatalf("devices = %#v, want one entry per pack", snap.Devices)
+	}
+	if snap.Devices[0].Name != "BAT0" || snap.Devices[1].Name != "BAT1" {
+		t.Fatalf("device names = %q, %q, want sysfs order BAT0, BAT1",
+			snap.Devices[0].Name, snap.Devices[1].Name)
+	}
+	bat0, bat1 := snap.Devices[0], snap.Devices[1]
+	if bat0.Kind != "Battery" || bat1.Kind != "Battery" {
+		t.Fatalf("kinds = %q, %q, want Battery", bat0.Kind, bat1.Kind)
+	}
+	if !bat0.ChargeValid || bat0.Charge != 0.5 || bat0.State != BatteryDischarging {
+		t.Fatalf("BAT0 = %#v, want charge 0.5 discharging", bat0)
+	}
+	if !bat0.RateValid || bat0.RateWatts != 20 {
+		t.Fatalf("BAT0 rate = %v valid=%v, want 20 W", bat0.RateWatts, bat0.RateValid)
+	}
+	if !bat1.ChargeValid || bat1.Charge != 0.4 || bat1.State != BatteryCharging {
+		t.Fatalf("BAT1 = %#v, want charge 0.4 charging", bat1)
+	}
+	// The catalog must not move the aggregate (issue #708).
+	if !snap.Present || !snap.ChargeValid || snap.Charge != 0.5 {
+		t.Fatalf("aggregate charge snapshot = %#v, want 0.5", snap)
+	}
+	if snap.State != BatteryCharging {
+		t.Fatalf("aggregate state = %v, want charging", snap.State)
+	}
+}
+
+func TestReadBatteryDeviceHealthFromEnergy(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now":         "36000000",
+		"energy_full":        "45000000",
+		"energy_full_design": "60000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 1 {
+		t.Fatalf("devices = %#v, want one", snap.Devices)
+	}
+	dev := snap.Devices[0]
+	// 45 Wh of 60 Wh design: health 0.75. µWh × 0.0036 = J.
+	if !dev.EnergyFullValid || !dev.HealthValid {
+		t.Fatalf("device = %#v, want EnergyFullValid and HealthValid", dev)
+	}
+	if want := 45000000 * 0.0036; math.Abs(dev.EnergyFull-want) > 1e-9 {
+		t.Fatalf("EnergyFull = %v, want %v", dev.EnergyFull, want)
+	}
+	if want := 60000000 * 0.0036; math.Abs(dev.EnergyFullDesign-want) > 1e-9 {
+		t.Fatalf("EnergyFullDesign = %v, want %v", dev.EnergyFullDesign, want)
+	}
+	if math.Abs(dev.Health-0.75) > 1e-9 {
+		t.Fatalf("Health = %v, want 0.75", dev.Health)
+	}
+}
+
+func TestReadBatteryDeviceHealthMissingDesignStaysInvalid(t *testing.T) {
+	root := t.TempDir()
+	// energy_full_design is absent on many packs, and the charge_*
+	// factory counter must not be mixed into the energy_* family
+	// (issue #708).
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type": "Battery", "status": "Discharging",
+		"energy_now":         "36000000",
+		"energy_full":        "45000000",
+		"charge_now":         "3000000",
+		"charge_full":        "4000000",
+		"charge_full_design": "5000000",
+		"voltage_now":        "12000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 1 {
+		t.Fatalf("devices = %#v, want one", snap.Devices)
+	}
+	dev := snap.Devices[0]
+	if dev.EnergyFullValid || dev.HealthValid {
+		t.Fatalf("device = %#v, want invalid health without energy_full_design", dev)
+	}
+	if dev.Health != 0 {
+		t.Fatalf("Health = %v, want 0 when invalid", dev.Health)
+	}
+	if !dev.ChargeValid || dev.Charge != 36000000.0/45000000.0 {
+		t.Fatalf("Charge = %v valid=%v, want the energy-path SOC", dev.Charge, dev.ChargeValid)
+	}
+}
+
+func TestReadBatteryDeviceHealthFromChargePack(t *testing.T) {
+	root := t.TempDir()
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type":        "Battery",
+		"status":      "Discharging",
+		"charge_now":  "1500000",
+		"charge_full": "3000000",
+		// 3000000 µAh × 12 V = 36 Wh of 48 Wh design → 0.75.
+		"charge_full_design": "4000000",
+		"voltage_now":        "12000000",
+		"current_now":        "-1000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 1 {
+		t.Fatalf("devices = %#v, want one", snap.Devices)
+	}
+	dev := snap.Devices[0]
+	if !dev.EnergyFullValid || !dev.HealthValid {
+		t.Fatalf("device = %#v, want EnergyFullValid and HealthValid via charge counters", dev)
+	}
+	if want := 3000000.0 * 12000000 / 1e12 * 3600; math.Abs(dev.EnergyFull-want) > 1e-9 {
+		t.Fatalf("EnergyFull = %v, want %v derived from charge_full × voltage", dev.EnergyFull, want)
+	}
+	if want := 4000000.0 * 12000000 / 1e12 * 3600; math.Abs(dev.EnergyFullDesign-want) > 1e-9 {
+		t.Fatalf("EnergyFullDesign = %v, want %v", dev.EnergyFullDesign, want)
+	}
+	if math.Abs(dev.Health-0.75) > 1e-9 {
+		t.Fatalf("Health = %v, want 0.75", dev.Health)
+	}
+}
+
+func TestReadBatteryDeviceHealthWithoutVoltageStaysInvalid(t *testing.T) {
+	root := t.TempDir()
+	// A charge_* pack with no voltage_now cannot be expressed in
+	// joules; health stays invalid rather than dividing µAh into µWh
+	// (issue #708).
+	writeSupply(t, root, "BAT0", map[string]string{
+		"type":               "Battery",
+		"status":             "Discharging",
+		"charge_now":         "1500000",
+		"charge_full":        "3000000",
+		"charge_full_design": "4000000",
+	})
+
+	snap, err := readBattery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Devices) != 1 {
+		t.Fatalf("devices = %#v, want one", snap.Devices)
+	}
+	dev := snap.Devices[0]
+	if dev.EnergyFullValid || dev.HealthValid {
+		t.Fatalf("device = %#v, want invalid health without voltage_now", dev)
+	}
+	if !dev.ChargeValid || dev.Charge != 0.5 {
+		t.Fatalf("Charge = %v valid=%v, want 0.5", dev.Charge, dev.ChargeValid)
+	}
+}

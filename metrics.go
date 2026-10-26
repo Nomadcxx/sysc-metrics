@@ -241,6 +241,29 @@ const (
 	BatteryFull
 )
 
+// BatteryDevice is one power-supply device's own reading. A machine with
+// several packs reports each here rather than only their aggregate, so a
+// consumer can show which pack is low or worn (issue #708).
+type BatteryDevice struct {
+	Name         string
+	Kind         string // "Battery" or "UPS"
+	Status       string
+	Charge       float64 // 0..1
+	ChargeValid  bool
+	State        BatteryState
+	EnergyJoules float64
+	// EnergyFull is the last full charge and EnergyFullDesign the
+	// factory capacity, in Joules. Health is the ratio of the two: a pack
+	// rated 60 Wh that now charges to 45 Wh has Health 0.75.
+	EnergyFull       float64
+	EnergyFullDesign float64
+	EnergyFullValid  bool
+	Health           float64 // 0..1
+	HealthValid      bool
+	RateWatts        float64
+	RateValid        bool
+}
+
 // BatterySnapshot is the aggregate battery observation. Present is false on a
 // machine with no battery; that is not an error.
 type BatterySnapshot struct {
@@ -254,7 +277,10 @@ type BatterySnapshot struct {
 	RateValid     bool
 	TimeRemaining time.Duration
 	TimeValid     bool
-	Issues        []Issue
+	// Devices is every system-scope battery or UPS, in sysfs name order.
+	// Nil when none is present.
+	Devices []BatteryDevice
+	Issues  []Issue
 }
 
 // ReadBattery collects the current aggregate battery. It prefers sysfs
@@ -328,13 +354,13 @@ func ReadGPU() (GPUSnapshot, error) {
 // descriptor each sample, and only while some GPU lacks usage. Other users'
 // clients are invisible to that walk, so usage can stay invalid.
 type GPUSampler struct {
-	drmRoot string
-	pmuRoot string
-	pciIDs  []string
-	smi     func() ([]byte, error)
-	now     func() time.Time
-	open    func(pmuRoot string, pmuType, config uint64) (gpuCounter, error)
-	engines map[string]*gpuPMUState
+	drmRoot  string
+	pmuRoot  string
+	pciNames *pciNameCache
+	smi      func() ([]byte, error)
+	now      func() time.Time
+	open     func(pmuRoot string, pmuType, config uint64) (gpuCounter, error)
+	engines  map[string]*gpuPMUState
 	// start begins the long-lived nvidia-smi child. It is nil when the
 	// sampler must not run one, and the child is never started then.
 	start func(period time.Duration) (nvidiaProcess, error)
