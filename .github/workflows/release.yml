@@ -1,0 +1,165 @@
+name: Release
+
+# A module release publishes the tag itself: the version the proxy serves is
+# the tag. There is no binary and no package, so the gate has to prove that
+# the tag is a version this module can actually be fetched at.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # A dispatch rehearses the release path for a tag that is not pushed yet.
+  # It runs the gate and the checks at the head of the dispatched ref, and
+  # it publishes nothing:
+  # gh workflow run release.yml --ref main -f tag=v0.7.4
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The tag to rehearse, for example v0.7.4.'
+        required: true
+        type: string
+
+# A release must never be cancelled mid-flight, so superseded runs queue.
+# The suffix names the workflow file rather than the run: a called workflow
+# sees the caller's workflow name, so the checks this run calls need groups
+# of their own or they would cancel this run.
+concurrency:
+  group: ${{ github.workflow }}-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The gate proves three things before anything is published: the tag has the
+  # shape this project publishes, it points at a commit that reached the
+  # default branch, and that commit passes the same checks the branch
+  # protection requires. Nothing is published until the gate passes.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.tag.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history and every tag: the ancestry check needs the
+          # merge that carried the tagged commit onto the default branch.
+          fetch-depth: 0
+      - name: Parse tag
+        id: tag
+        env:
+          # A dispatch names the tag it rehearses; a tag push carries it in
+          # the ref.
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "tag '$tag' is not v<major>.<minor>.<patch>" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            # Fetch the tag itself. The checkout does not follow tags unless
+            # the run was triggered by one, and the commit under the tag is
+            # what the gate has to reason about.
+            git fetch --no-tags --force origin "refs/tags/$tag:refs/tags/$tag"
+            echo "commit=$(git rev-list -n1 "$tag")" >> "$GITHUB_OUTPUT"
+          else
+            # A rehearsal runs at the head of the dispatched ref, which is
+            # the commit the planned tag will point at.
+            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify the tagged commit reached the default branch
+        run: |
+          set -euo pipefail
+          commit="${{ steps.tag.outputs.commit }}"
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "the commit $commit under ${{ steps.tag.outputs.tag }} never reached main" >&2
+            exit 1
+          fi
+
+  # The checks the branch protection requires, re-run against the tagged
+  # commit. Calling the workflows the branch already trusts keeps one test
+  # policy: a check added to ci.yml reaches the release gate without a second
+  # edit here. A called run is pinned to the tag, so it tests the tree that
+  # ships.
+  checks:
+    needs: gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  scan:
+    needs: gate
+    uses: ./.github/workflows/vuln.yml
+    permissions:
+      contents: read
+
+  # A module release is the tag. This proves the module path resolves at the
+  # tag, which is the thing a consumer asks for. The proxy falls back to the
+  # source repository, so the check works for a tag the proxy has not indexed
+  # yet. A rehearsal resolves the commit instead, because the tag it names
+  # does not exist yet.
+  module:
+    needs: [gate, checks, scan]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Resolve the module path at the tag
+        env:
+          TAG: ${{ needs.gate.outputs.tag }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+          MODULE: github.com/Nomadcxx/sysc-metrics
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            resolved="$(GOPROXY=https://proxy.golang.org,direct go list -m "$MODULE@$TAG")"
+            if [[ "$resolved" != *"$TAG" ]]; then
+              echo "the module path does not resolve to $TAG: $resolved" >&2
+              exit 1
+            fi
+          else
+            resolved="$(GOPROXY=https://proxy.golang.org,direct go list -m "$MODULE@$COMMIT")"
+            if [[ "$resolved" != *"${COMMIT:0:12}" ]]; then
+              echo "the module path does not resolve at $COMMIT: $resolved" >&2
+              exit 1
+            fi
+          fi
+          echo "$resolved"
+
+  # Publishes the release once the gate passed. A dispatch stops here: only
+  # a tag push publishes.
+  release:
+    needs: [gate, checks, scan, module]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.gate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # The release for this tag already exists. Re-running a finished
+            # release must not replace it.
+            echo "the release for $TAG already exists" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --title "sysc-metrics $TAG" \
+            --generate-notes \
+            --verify-tag
