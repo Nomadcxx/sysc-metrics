@@ -24,7 +24,8 @@ Read-only system telemetry for Go. Linux collectors read CPU, memory, disks, net
   LED class, which is how the keyboard backlight and the lid logo light are exposed
 - **Battery**: charge, state, power draw and time remaining, combined across every battery and UPS
 - **GPU**: usage, temperature, name and VRAM for AMD, NVIDIA and Intel
-- **Processes**: CPU and memory per process, with identities that don't get confused by PID reuse
+- **Processes**: CPU, resident and swap memory, executable, and I/O rates per process; identities
+  protect against PID reuse
 - **Uptime**
 - **Small**: standard library only, with no background polling
 
@@ -108,6 +109,10 @@ A few rules hold everywhere:
 - **One sampler, one caller.** Samplers keep the previous reading and aren't safe for concurrent use.
   Give each polling loop its own. Close a `GPUSampler` when you stop polling, because it holds open
   counters.
+
+Process snapshots include best-effort executable and swap readings. `ProcessIO` rates become valid
+after two counter readings. `ReadProcessMemory(identity)` reads private/shared totals for one selected
+process from `smaps_rollup`, without scanning every process.
 
 How often to poll, what to cache, and how to show the numbers is up to you.
 
