@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseProcessStatKeepsParenthesizedNameAndIdentity(t *testing.T) {
@@ -37,7 +38,7 @@ func TestParseProcessStatusReadsRealUIDAndResidentBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.uidValid || got.uid != 1000 || !got.residentValid || got.residentBytes != 42*1024 {
+	if !got.uidValid || got.uid != 1000 || !got.residentValid || got.residentBytes != 42*1024 || got.swapValid {
 		t.Fatalf("status = %#v", got)
 	}
 
@@ -45,10 +46,111 @@ func TestParseProcessStatusReadsRealUIDAndResidentBytes(t *testing.T) {
 	if err != nil || !got.uidValid || got.uid != 0 || got.residentValid {
 		t.Fatalf("status without VmRSS = %#v, %v", got, err)
 	}
-	for _, input := range []string{"", "Uid:\tnope\n", "Uid:\t1\nUid:\t2\n", "Uid:\t1\nVmRSS:\t-1 kB\n"} {
+	for _, input := range []string{
+		"", "Uid:\tnope\n", "Uid:\t1\nUid:\t2\n", "Uid:\t1\nVmRSS:\t-1 kB\n",
+		"Uid:\t1\nVmSwap:\t-1 kB\n", "Uid:\t1\nVmSwap:\t1 kB\nVmSwap:\t2 kB\n",
+		"Uid:\t1\nVmSwap:\t18014398509481984 kB\n",
+	} {
 		if _, err := parseProcessStatus(strings.NewReader(input)); err == nil {
 			t.Errorf("parseProcessStatus(%q) unexpectedly succeeded", input)
 		}
+	}
+}
+
+func TestParseProcessStatusReadsVmSwap(t *testing.T) {
+	got, err := parseProcessStatus(strings.NewReader("Uid:\t1000\t1000\t1000\t1000\nVmSwap:\t7 kB\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.swapValid || got.swapBytes != 7*1024 {
+		t.Fatalf("swap = %d, valid=%v", got.swapBytes, got.swapValid)
+	}
+}
+
+func TestParseProcessIOReadsDiskCounters(t *testing.T) {
+	got, err := parseProcessIO(strings.NewReader("rchar: 90\nread_bytes: 300\nwrite_bytes: 700\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.readBytes != 300 || got.writeBytes != 700 {
+		t.Fatalf("I/O counters = %#v", got)
+	}
+	for _, input := range []string{
+		"write_bytes: 1\n",
+		"read_bytes: nope\nwrite_bytes: 1\n",
+		"read_bytes: 1\nread_bytes: 2\nwrite_bytes: 1\n",
+	} {
+		if _, err := parseProcessIO(strings.NewReader(input)); err == nil {
+			t.Errorf("parseProcessIO(%q) unexpectedly succeeded", input)
+		}
+	}
+}
+
+func TestProcessSamplerAddsExecutableSwapAndIORates(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 100)
+	writeProcess(t, root, 42, "worker", 1, 10, 991, 1000, 40, []string{"worker"})
+	writeProcessIO(t, root, 42, 100, 200)
+	sampler := newProcessSampler(root)
+
+	first, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Processes) != 1 {
+		t.Fatalf("first snapshot = %#v", first)
+	}
+	p := first.Processes[0]
+	if !p.ExecutableValid || p.Executable != "/usr/bin/worker" || !p.SwapValid || p.SwapBytes != 7*1024 {
+		t.Fatalf("first process details = %#v", p)
+	}
+	if p.IO.Valid {
+		t.Fatalf("first I/O sample must be invalid: %#v", p.IO)
+	}
+
+	time.Sleep(time.Millisecond)
+	writeProcStat(t, root, 200)
+	writeProcess(t, root, 42, "worker", 1, 30, 991, 1000, 40, []string{"worker"})
+	writeProcessIO(t, root, 42, 160, 280)
+	second, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Processes) != 1 || !second.Processes[0].IO.Valid {
+		t.Fatalf("second process I/O = %#v", second)
+	}
+	elapsed := second.CollectedAt.Sub(first.CollectedAt).Seconds()
+	if elapsed <= 0 {
+		t.Fatalf("sample interval = %v", elapsed)
+	}
+	got := second.Processes[0].IO
+	if got.ReadBytesPerSecond != 60/elapsed || got.WriteBytesPerSecond != 80/elapsed {
+		t.Fatalf("I/O rates = %#v, interval=%v", got, elapsed)
+	}
+
+	time.Sleep(time.Millisecond)
+	writeProcStat(t, root, 300)
+	writeProcess(t, root, 42, "worker", 1, 50, 991, 1000, 40, []string{"worker"})
+	writeProcessIO(t, root, 42, 150, 270)
+	third, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Processes) != 1 || third.Processes[0].IO.Valid {
+		t.Fatalf("regressed I/O counters stayed valid: %#v", third)
+	}
+
+	time.Sleep(time.Millisecond)
+	writeProcStat(t, root, 400)
+	writeProcess(t, root, 42, "worker", 1, 70, 991, 1000, 40, []string{"worker"})
+	writeProcessIO(t, root, 42, 150, 270)
+	fourth, err := sampler.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fourth.Processes) != 1 || !fourth.Processes[0].IO.Valid ||
+		fourth.Processes[0].IO.ReadBytesPerSecond != 0 || fourth.Processes[0].IO.WriteBytesPerSecond != 0 {
+		t.Fatalf("valid zero-rate sample = %#v", fourth)
 	}
 }
 
@@ -106,6 +208,7 @@ func TestProcessSamplerDoesNotBridgePIDReuse(t *testing.T) {
 	root := t.TempDir()
 	writeProcStat(t, root, 100)
 	writeProcess(t, root, 7, "old", 1, 10, 100, 1000, 1, nil)
+	writeProcessIO(t, root, 7, 100, 200)
 	sampler := newProcessSampler(root)
 	if _, err := sampler.Sample(); err != nil {
 		t.Fatal(err)
@@ -113,8 +216,9 @@ func TestProcessSamplerDoesNotBridgePIDReuse(t *testing.T) {
 
 	writeProcStat(t, root, 200)
 	writeProcess(t, root, 7, "new", 1, 80, 200, 1000, 2, nil)
+	writeProcessIO(t, root, 7, 200, 400)
 	got, err := sampler.Sample()
-	if err != nil || len(got.Processes) != 1 || got.Processes[0].CPU.Valid || got.Processes[0].Identity.StartTimeTicks != 200 {
+	if err != nil || len(got.Processes) != 1 || got.Processes[0].CPU.Valid || got.Processes[0].IO.Valid || got.Processes[0].Identity.StartTimeTicks != 200 {
 		t.Fatalf("reused PID snapshot = %#v, %v", got, err)
 	}
 }
@@ -159,6 +263,25 @@ func TestProcessSamplerKeepsProcessWhenStatusIsPartial(t *testing.T) {
 	}
 }
 
+func TestProcessSamplerKeepsProcessWhenExecutableAndIOAreUnreadable(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 100)
+	writeProcess(t, root, 2, "partial", 1, 5, 20, 1000, 1, nil)
+	for _, name := range []string{"exe", "io"} {
+		if err := os.Remove(filepath.Join(root, "2", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := newProcessSampler(root).Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Processes) != 1 || got.Processes[0].ExecutableValid || got.Processes[0].IO.Valid {
+		t.Fatalf("partial process snapshot = %#v", got)
+	}
+}
+
 func TestValidateProcessIdentityRefusesReplacementAndVanishedProcess(t *testing.T) {
 	root := t.TempDir()
 	writeProcess(t, root, 42, "worker", 1, 1, 991, 1000, 1, nil)
@@ -179,6 +302,74 @@ func TestValidateProcessIdentityRefusesReplacementAndVanishedProcess(t *testing.
 	}
 	if err := validateProcessIdentity(root, ProcessIdentity{}); err == nil {
 		t.Fatal("zero identity validated")
+	}
+}
+
+func TestParseProcessMemorySumsPrivateAndSharedFields(t *testing.T) {
+	input := "Rss: 64 kB\nPrivate_Clean: 10 kB\nPrivate_Dirty: 2 kB\nPrivate_Hugetlb: 3 kB\n" +
+		"Shared_Clean: 4 kB\nShared_Dirty: 5 kB\nShared_Hugetlb: 6 kB\n"
+	got, err := parseProcessMemory(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PrivateBytes != 15*1024 || got.SharedBytes != 15*1024 {
+		t.Fatalf("process memory = %#v", got)
+	}
+}
+
+func TestParseProcessMemoryRejectsMalformedOrIncompleteFields(t *testing.T) {
+	for _, input := range []string{
+		"Private_Clean: invalid kB\nShared_Clean: 1 kB\n",
+		"Private_Clean: 1 KB\nShared_Clean: 1 kB\n",
+		"Private_Clean: 1 kB\n",
+		"Private_Clean: 18014398509481984 kB\nShared_Clean: 1 kB\n",
+		"Private_Clean: 18014398509481983 kB\nPrivate_Dirty: 1 kB\nShared_Clean: 1 kB\n",
+	} {
+		if _, err := parseProcessMemory(strings.NewReader(input)); err == nil {
+			t.Errorf("parseProcessMemory(%q) unexpectedly succeeded", input)
+		}
+	}
+}
+
+func TestReadProcessMemoryUsesIdentityAndRollup(t *testing.T) {
+	root := t.TempDir()
+	writeProcess(t, root, 42, "worker", 1, 10, 991, 1000, 40, nil)
+	path := filepath.Join(root, "42", "smaps_rollup")
+	rollup := "Private_Clean: 11 kB\nPrivate_Dirty: 2 kB\nShared_Clean: 7 kB\nShared_Dirty: 3 kB\n"
+	if err := os.WriteFile(path, []byte(rollup), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id := ProcessIdentity{PID: 42, StartTimeTicks: 991}
+	got, err := readProcessMemory(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PrivateBytes != 13*1024 || got.SharedBytes != 10*1024 {
+		t.Fatalf("process memory = %#v", got)
+	}
+
+	writeProcess(t, root, 42, "replacement", 1, 1, 992, 1000, 40, nil)
+	if _, err := readProcessMemory(root, id); !errors.Is(err, ErrProcessIdentityChanged) {
+		t.Fatalf("replacement error = %v", err)
+	}
+}
+
+func TestReadProcessMemoryReadsCurrentProcess(t *testing.T) {
+	pid := os.Getpid()
+	data, err := os.ReadFile(filepath.Join("/proc", fmt.Sprint(pid), "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := parseProcessStat(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadProcessMemory(ProcessIdentity{PID: pid, StartTimeTicks: stat.startTimeTicks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PrivateBytes+got.SharedBytes == 0 {
+		t.Fatalf("empty process memory: %#v", got)
 	}
 }
 
@@ -207,15 +398,31 @@ func writeProcess(t *testing.T, root string, pid int, name string, ppid int, cpu
 	fields[19] = fmt.Sprint(start)
 	fields[21] = fmt.Sprint(rssKB)
 	stat := fmt.Sprintf("%d (%s) %s\n", pid, name, strings.Join(fields, " "))
-	status := fmt.Sprintf("Name:\t%s\nUid:\t%d\t%d\t%d\t%d\nVmRSS:\t%d kB\n", name, uid, uid, uid, uid, rssKB)
+	status := fmt.Sprintf("Name:\t%s\nUid:\t%d\t%d\t%d\t%d\nVmRSS:\t%d kB\nVmSwap:\t7 kB\n", name, uid, uid, uid, uid, rssKB)
 	cmdline := strings.Join(args, "\x00")
 	if len(args) > 0 {
 		cmdline += "\x00"
 	}
-	for name, body := range map[string]string{"stat": stat, "status": status, "cmdline": cmdline} {
+	for name, body := range map[string]string{"stat": stat, "status": status, "cmdline": cmdline, "io": "read_bytes: 0\nwrite_bytes: 0\n"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	exePath := filepath.Join(dir, "exe")
+	if err := os.Remove(exePath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/"+name, exePath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeProcessIO(t *testing.T, root string, pid int, readBytes, writeBytes uint64) {
+	t.Helper()
+	body := fmt.Sprintf("rchar: 10\nwchar: 20\nread_bytes: %d\nwrite_bytes: %d\n", readBytes, writeBytes)
+	path := filepath.Join(root, fmt.Sprint(pid), "io")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

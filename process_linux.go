@@ -33,6 +33,13 @@ type parsedProcessStatus struct {
 	uidValid      bool
 	residentBytes uint64
 	residentValid bool
+	swapBytes     uint64
+	swapValid     bool
+}
+
+type processIOCounters struct {
+	readBytes  uint64
+	writeBytes uint64
 }
 
 func parseProcessStat(line string) (parsedProcessStat, error) {
@@ -82,10 +89,11 @@ func parseProcessStatus(r io.Reader) (parsedProcessStatus, error) {
 	var status parsedProcessStatus
 	seenUID := false
 	seenResident := false
+	seenSwap := false
 	scanner := newKernelScanner(r)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
-		if !bytes.HasPrefix(line, []byte("Uid:")) && !bytes.HasPrefix(line, []byte("VmRSS:")) {
+		if !bytes.HasPrefix(line, []byte("Uid:")) && !bytes.HasPrefix(line, []byte("VmRSS:")) && !bytes.HasPrefix(line, []byte("VmSwap:")) {
 			continue
 		}
 		fields := bytes.Fields(line)
@@ -121,6 +129,20 @@ func parseProcessStatus(r io.Reader) (parsedProcessStatus, error) {
 			}
 			status.residentBytes = residentKB * 1024
 			status.residentValid = true
+		case "VmSwap:":
+			if seenSwap {
+				return parsedProcessStatus{}, fmt.Errorf("duplicate VmSwap field")
+			}
+			seenSwap = true
+			if len(fields) != 3 || string(fields[2]) != "kB" {
+				return parsedProcessStatus{}, fmt.Errorf("VmSwap: expected kB value")
+			}
+			swapKB, err := strconv.ParseUint(string(fields[1]), 10, 64)
+			if err != nil || swapKB > math.MaxUint64/1024 {
+				return parsedProcessStatus{}, fmt.Errorf("VmSwap: invalid kB value")
+			}
+			status.swapBytes = swapKB * 1024
+			status.swapValid = true
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -130,6 +152,91 @@ func parseProcessStatus(r io.Reader) (parsedProcessStatus, error) {
 		return parsedProcessStatus{}, fmt.Errorf("missing Uid field")
 	}
 	return status, nil
+}
+
+func parseProcessIO(r io.Reader) (processIOCounters, error) {
+	var counters processIOCounters
+	seenRead := false
+	seenWrite := false
+	scanner := newKernelScanner(r)
+	for scanner.Scan() {
+		fields := bytes.Fields(bytes.TrimSpace(scanner.Bytes()))
+		if len(fields) == 0 {
+			continue
+		}
+		var dst *uint64
+		var seen *bool
+		switch string(fields[0]) {
+		case "read_bytes:":
+			dst, seen = &counters.readBytes, &seenRead
+		case "write_bytes:":
+			dst, seen = &counters.writeBytes, &seenWrite
+		default:
+			continue
+		}
+		if *seen {
+			return processIOCounters{}, fmt.Errorf("duplicate %s field", string(fields[0]))
+		}
+		*seen = true
+		if len(fields) != 2 {
+			return processIOCounters{}, fmt.Errorf("%s: expected one counter", string(fields[0]))
+		}
+		value, err := strconv.ParseUint(string(fields[1]), 10, 64)
+		if err != nil {
+			return processIOCounters{}, fmt.Errorf("%s: invalid counter: %w", string(fields[0]), err)
+		}
+		*dst = value
+	}
+	if err := scanner.Err(); err != nil {
+		return processIOCounters{}, fmt.Errorf("scan: %w", err)
+	}
+	if !seenRead || !seenWrite {
+		return processIOCounters{}, fmt.Errorf("missing read_bytes or write_bytes field")
+	}
+	return counters, nil
+}
+
+func parseProcessMemory(r io.Reader) (ProcessMemory, error) {
+	var memory ProcessMemory
+	seenPrivate := false
+	seenShared := false
+	scanner := newKernelScanner(r)
+	for scanner.Scan() {
+		fields := bytes.Fields(bytes.TrimSpace(scanner.Bytes()))
+		if len(fields) == 0 {
+			continue
+		}
+		var total *uint64
+		var seen *bool
+		switch {
+		case bytes.HasPrefix(fields[0], []byte("Private_")):
+			total, seen = &memory.PrivateBytes, &seenPrivate
+		case bytes.HasPrefix(fields[0], []byte("Shared_")):
+			total, seen = &memory.SharedBytes, &seenShared
+		default:
+			continue
+		}
+		if len(fields) != 3 || string(fields[2]) != "kB" {
+			return ProcessMemory{}, fmt.Errorf("%s: expected kB value", string(fields[0]))
+		}
+		kB, err := strconv.ParseUint(string(fields[1]), 10, 64)
+		if err != nil || kB > math.MaxUint64/1024 {
+			return ProcessMemory{}, fmt.Errorf("%s: invalid kB value", string(fields[0]))
+		}
+		value := kB * 1024
+		if math.MaxUint64-*total < value {
+			return ProcessMemory{}, fmt.Errorf("%s: byte total overflow", string(fields[0]))
+		}
+		*total += value
+		*seen = true
+	}
+	if err := scanner.Err(); err != nil {
+		return ProcessMemory{}, fmt.Errorf("scan: %w", err)
+	}
+	if !seenPrivate || !seenShared {
+		return ProcessMemory{}, fmt.Errorf("missing private or shared memory fields")
+	}
+	return memory, nil
 }
 
 func newProcessSampler(root string) *ProcessSampler {
@@ -233,6 +340,7 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 
 	snapshot := ProcessSnapshot{CollectedAt: at, Processes: make([]Process, 0, len(entries))}
 	current := make(map[ProcessIdentity]uint64, len(entries))
+	currentIO := make(map[ProcessIdentity]processIOCounters, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -261,6 +369,14 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		process := Process{Identity: identity, Name: stat.name, ParentPID: stat.parentPID}
 		current[identity] = stat.cpuTicks
 
+		exePath := dir + "/exe"
+		if executable, err := os.Readlink(exePath); err != nil {
+			snapshot.Issues = append(snapshot.Issues, Issue{Source: exePath, Err: err})
+		} else {
+			process.Executable = executable
+			process.ExecutableValid = true
+		}
+
 		statusPath := dir + "/status"
 		statusData, buffer, err := readProcessFile(statusPath, s.readBuffer)
 		s.readBuffer = buffer
@@ -275,7 +391,20 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 				process.UIDValid = status.uidValid
 				process.ResidentBytes = status.residentBytes
 				process.ResidentValid = status.residentValid
+				process.SwapBytes = status.swapBytes
+				process.SwapValid = status.swapValid
 			}
+		}
+
+		ioPath := dir + "/io"
+		ioData, buffer, err := readProcessFile(ioPath, s.readBuffer)
+		s.readBuffer = buffer
+		if err != nil {
+			snapshot.Issues = append(snapshot.Issues, Issue{Source: ioPath, Err: err})
+		} else if counters, parseErr := parseProcessIO(bytes.NewReader(ioData)); parseErr != nil {
+			snapshot.Issues = append(snapshot.Issues, Issue{Source: ioPath, Err: parseErr})
+		} else {
+			currentIO[identity] = counters
 		}
 
 		cmdlinePath := dir + "/cmdline"
@@ -313,6 +442,27 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 			}
 		}
 	}
+	if !s.previousIOAt.IsZero() {
+		elapsed := at.Sub(s.previousIOAt).Seconds()
+		if elapsed > 0 {
+			for i := range snapshot.Processes {
+				identity := snapshot.Processes[i].Identity
+				currentCounters, ok := currentIO[identity]
+				if !ok {
+					continue
+				}
+				previousCounters, ok := s.previousIO[identity]
+				if !ok || currentCounters.readBytes < previousCounters.readBytes || currentCounters.writeBytes < previousCounters.writeBytes {
+					continue
+				}
+				snapshot.Processes[i].IO = ProcessIO{
+					ReadBytesPerSecond:  float64(currentCounters.readBytes-previousCounters.readBytes) / elapsed,
+					WriteBytesPerSecond: float64(currentCounters.writeBytes-previousCounters.writeBytes) / elapsed,
+					Valid:               true,
+				}
+			}
+		}
+	}
 
 	sort.Slice(snapshot.Processes, func(i, j int) bool {
 		return snapshot.Processes[i].Identity.PID < snapshot.Processes[j].Identity.PID
@@ -320,12 +470,39 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 	s.previousTotal = totalBefore
 	s.previous = current
 	s.hasPrevious = true
+	s.previousIO = currentIO
+	s.previousIOAt = at
 	return snapshot, nil
 }
 
 // ValidateProcessIdentity confirms that identity still names the same process.
 func ValidateProcessIdentity(identity ProcessIdentity) error {
 	return validateProcessIdentity("/proc", identity)
+}
+
+// ReadProcessMemory reads private and shared memory for one selected process.
+// It rejects the result if the PID no longer identifies the requested process.
+func ReadProcessMemory(identity ProcessIdentity) (ProcessMemory, error) {
+	return readProcessMemory("/proc", identity)
+}
+
+func readProcessMemory(root string, identity ProcessIdentity) (ProcessMemory, error) {
+	if err := validateProcessIdentity(root, identity); err != nil {
+		return ProcessMemory{}, err
+	}
+	path := filepath.Join(root, strconv.Itoa(identity.PID), "smaps_rollup")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ProcessMemory{}, fmt.Errorf("%s: %w", path, err)
+	}
+	memory, err := parseProcessMemory(bytes.NewReader(data))
+	if err != nil {
+		return ProcessMemory{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := validateProcessIdentity(root, identity); err != nil {
+		return ProcessMemory{}, err
+	}
+	return memory, nil
 }
 
 func validateProcessIdentity(root string, identity ProcessIdentity) error {

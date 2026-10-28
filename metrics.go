@@ -164,17 +164,36 @@ type ProcessIdentity struct {
 	StartTimeTicks uint64
 }
 
-// Process contains one process observation and its best-effort derived CPU usage.
+// Process contains one process observation and its best-effort derived CPU and I/O rates.
 type Process struct {
-	Identity      ProcessIdentity
-	Name          string
-	ParentPID     int
-	UID           uint32
-	UIDValid      bool
-	ResidentBytes uint64
-	ResidentValid bool
-	Args          []string
-	CPU           CPUUsage
+	Identity        ProcessIdentity
+	Name            string
+	ParentPID       int
+	UID             uint32
+	UIDValid        bool
+	ResidentBytes   uint64
+	ResidentValid   bool
+	Executable      string
+	ExecutableValid bool
+	SwapBytes       uint64
+	SwapValid       bool
+	IO              ProcessIO
+	Args            []string
+	CPU             CPUUsage
+}
+
+// ProcessIO contains per-process read and write rates. Valid distinguishes
+// an observed zero rate from a missing baseline or unreadable counter.
+type ProcessIO struct {
+	ReadBytesPerSecond  float64
+	WriteBytesPerSecond float64
+	Valid               bool
+}
+
+// ProcessMemory contains private and shared process memory in bytes.
+type ProcessMemory struct {
+	PrivateBytes uint64
+	SharedBytes  uint64
 }
 
 // ProcessSnapshot contains processes collected at one time. Processes, Args,

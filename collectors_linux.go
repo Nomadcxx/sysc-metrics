@@ -30,7 +30,7 @@ type NetworkSampler struct {
 	previousAt time.Time
 }
 
-// ProcessSampler retains previous process and aggregate CPU counters for
+// ProcessSampler retains previous process CPU and I/O counters for
 // sequential rate sampling. previousTotal is the aggregate tick count read
 // before the previous process walk. The next sample closes that window with
 // a second read taken after its own walk, so both process stats fall inside
@@ -41,6 +41,8 @@ type ProcessSampler struct {
 	previousTotal uint64
 	previous      map[ProcessIdentity]uint64
 	hasPrevious   bool
+	previousIO    map[ProcessIdentity]processIOCounters
+	previousIOAt  time.Time
 	// readTotal, when set, replaces the aggregate tick read from <root>/stat.
 	// Production leaves it nil. Tests use it to move the total between the
 	// pre-walk and post-walk reads.
