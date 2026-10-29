@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -298,6 +299,10 @@ func openProcessFile(path string, open func(string, int, uint32) (int, error)) (
 	}
 }
 
+func expectedProcessReadError(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission)
+}
+
 func (s *ProcessSampler) readTotalCPUTicks() (uint64, error) {
 	if s.readTotal != nil {
 		return s.readTotal()
@@ -371,7 +376,9 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 
 		exePath := dir + "/exe"
 		if executable, err := os.Readlink(exePath); err != nil {
-			snapshot.Issues = append(snapshot.Issues, Issue{Source: exePath, Err: err})
+			if !expectedProcessReadError(err) {
+				snapshot.Issues = append(snapshot.Issues, Issue{Source: exePath, Err: err})
+			}
 		} else {
 			process.Executable = executable
 			process.ExecutableValid = true
@@ -381,7 +388,9 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		statusData, buffer, err := readProcessFile(statusPath, s.readBuffer)
 		s.readBuffer = buffer
 		if err != nil {
-			snapshot.Issues = append(snapshot.Issues, Issue{Source: statusPath, Err: err})
+			if !errors.Is(err, fs.ErrNotExist) {
+				snapshot.Issues = append(snapshot.Issues, Issue{Source: statusPath, Err: err})
+			}
 		} else {
 			status, parseErr := parseProcessStatus(bytes.NewReader(statusData))
 			if parseErr != nil {
@@ -400,7 +409,9 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		ioData, buffer, err := readProcessFile(ioPath, s.readBuffer)
 		s.readBuffer = buffer
 		if err != nil {
-			snapshot.Issues = append(snapshot.Issues, Issue{Source: ioPath, Err: err})
+			if !expectedProcessReadError(err) {
+				snapshot.Issues = append(snapshot.Issues, Issue{Source: ioPath, Err: err})
+			}
 		} else if counters, parseErr := parseProcessIO(bytes.NewReader(ioData)); parseErr != nil {
 			snapshot.Issues = append(snapshot.Issues, Issue{Source: ioPath, Err: parseErr})
 		} else {
@@ -411,7 +422,9 @@ func (s *ProcessSampler) Sample() (ProcessSnapshot, error) {
 		cmdlineData, buffer, err := readProcessFile(cmdlinePath, s.readBuffer)
 		s.readBuffer = buffer
 		if err != nil {
-			snapshot.Issues = append(snapshot.Issues, Issue{Source: cmdlinePath, Err: err})
+			if !errors.Is(err, fs.ErrNotExist) {
+				snapshot.Issues = append(snapshot.Issues, Issue{Source: cmdlinePath, Err: err})
+			}
 		} else {
 			process.Args = parseProcessArgs(cmdlineData)
 		}
