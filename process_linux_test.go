@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -267,7 +268,7 @@ func TestProcessSamplerKeepsProcessWhenExecutableAndIOAreUnreadable(t *testing.T
 	root := t.TempDir()
 	writeProcStat(t, root, 100)
 	writeProcess(t, root, 2, "partial", 1, 5, 20, 1000, 1, nil)
-	for _, name := range []string{"exe", "io"} {
+	for _, name := range []string{"exe", "io", "status", "cmdline"} {
 		if err := os.Remove(filepath.Join(root, "2", name)); err != nil {
 			t.Fatal(err)
 		}
@@ -277,8 +278,68 @@ func TestProcessSamplerKeepsProcessWhenExecutableAndIOAreUnreadable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Processes) != 1 || got.Processes[0].ExecutableValid || got.Processes[0].IO.Valid {
+	if len(got.Processes) != 1 || got.Processes[0].ExecutableValid || got.Processes[0].UIDValid ||
+		got.Processes[0].IO.Valid || len(got.Processes[0].Args) != 0 || len(got.Issues) != 0 {
 		t.Fatalf("partial process snapshot = %#v", got)
+	}
+}
+
+func TestProcessSamplerSkipsPermissionDeniedIO(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read mode-zero proc files")
+	}
+	root := t.TempDir()
+	writeProcStat(t, root, 100)
+	writeProcess(t, root, 2, "partial", 1, 5, 20, 1000, 1, nil)
+	ioPath := filepath.Join(root, "2", "io")
+	if err := os.Chmod(ioPath, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := newProcessSampler(root).Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Processes) != 1 || got.Processes[0].IO.Valid || len(got.Issues) != 0 {
+		t.Fatalf("permission-denied process snapshot = %#v", got)
+	}
+}
+
+func TestProcessSamplerReportsMalformedIO(t *testing.T) {
+	root := t.TempDir()
+	writeProcStat(t, root, 100)
+	writeProcess(t, root, 2, "partial", 1, 5, 20, 1000, 1, nil)
+	ioPath := filepath.Join(root, "2", "io")
+	if err := os.WriteFile(ioPath, []byte("read_bytes: invalid\nwrite_bytes: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := newProcessSampler(root).Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Processes) != 1 || got.Processes[0].IO.Valid || len(got.Issues) != 1 || got.Issues[0].Source != ioPath {
+		t.Fatalf("malformed process I/O snapshot = %#v", got)
+	}
+}
+
+func TestExpectedProcessReadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "missing", err: &os.PathError{Err: syscall.ENOENT}, want: true},
+		{name: "permission denied", err: &os.PathError{Err: syscall.EACCES}, want: true},
+		{name: "operation not permitted", err: &os.PathError{Err: syscall.EPERM}, want: true},
+		{name: "I/O failure", err: &os.PathError{Err: syscall.EIO}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := expectedProcessReadError(tt.err); got != tt.want {
+				t.Fatalf("expectedProcessReadError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

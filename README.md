@@ -114,6 +114,9 @@ Process snapshots include best-effort executable and swap readings. `ProcessIO` 
 after two counter readings. `ReadProcessMemory(identity)` reads private/shared totals for one selected
 process from `smaps_rollup`, without scanning every process.
 
+Expected missing or permission-denied executable and I/O files leave their validity flags false without
+adding an issue. `ProcessSnapshot.Issues` reports unexpected read failures and parse errors.
+
 How often to poll, what to cache, and how to show the numbers is up to you.
 
 ## GPU usage

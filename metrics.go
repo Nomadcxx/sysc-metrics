@@ -197,7 +197,9 @@ type ProcessMemory struct {
 }
 
 // ProcessSnapshot contains processes collected at one time. Processes, Args,
-// and Issues are caller-owned snapshot slices.
+// and Issues are caller-owned snapshot slices. Expected missing or
+// permission-denied executable and I/O readings leave their validity flags
+// false; Issues contains unexpected read failures and parse errors.
 type ProcessSnapshot struct {
 	CollectedAt time.Time
 	Processes   []Process
